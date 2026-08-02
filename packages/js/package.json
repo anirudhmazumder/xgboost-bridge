@@ -1,0 +1,39 @@
+{
+  "name": "xgboost-predictor",
+  "version": "0.1.0",
+  "description": "Zero-dependency XGBoost inference for browser, edge, and Node runtimes.",
+  "license": "MIT",
+  "type": "module",
+  "types": "./dist/index.d.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test test/",
+    "test:nobuild": "node --test test/"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

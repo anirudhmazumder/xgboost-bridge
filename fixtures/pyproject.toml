@@ -1,0 +1,13 @@
+[project]
+name = "xgboost-bridge-fixtures"
+version = "0.0.0"
+description = "Fixture corpus generation. Not published."
+requires-python = ">=3.12"
+dependencies = [
+    "xgboost==3.3.0",
+    "numpy>=1.24",
+    "xgboost-bridge",
+]
+
+[tool.uv]
+package = false

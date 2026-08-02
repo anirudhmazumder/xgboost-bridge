@@ -1,0 +1,68 @@
+name: CI
+
+# Test-only workflow. There is no publish/release job here at all — nothing in
+# this file can push a package anywhere. See COMPAT.md and DECISIONS.md for
+# the compatibility and release policy.
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    name: Python suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python 3.12
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sync workspace (packages/python, fixtures)
+        run: uv sync
+
+      - name: Run Python test suite
+        run: uv run pytest
+
+  javascript:
+    name: JavaScript suite
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/js
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      # Zero JS runtime dependencies is non-negotiable (D009). Assert it
+      # numerically rather than assuming package.json was never edited.
+      - name: Assert zero JS runtime dependencies
+        run: |
+          COUNT=$(node -p "Object.keys(require('./package.json').dependencies || {}).length")
+          echo "Runtime dependency count: $COUNT"
+          if [ "$COUNT" -ne 0 ]; then
+            echo "FAIL: expected 0 runtime dependencies, found $COUNT"
+            exit 1
+          fi
+
+      # Separate step from the build, per D011.
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build (bundle to dist/)
+        run: npm run build
+
+      # Runs against the built dist/ output, not src/ (D011). The build step
+      # above already produced dist/, so this deliberately does not re-run it.
+      - name: Run JavaScript test suite
+        run: npm run test:nobuild
