@@ -157,3 +157,191 @@ class FeatureKeyMismatchError(XGBoostBridgeError):
         if extra_keys:
             parts.append(f"extra keys: {sorted(extra_keys)}")
         super().__init__(f"feature key mismatch ({'; '.join(parts)})")
+
+
+class UnsupportedModelShapeError(XGBoostBridgeError):
+    """Raised when a model's output arity is not scalar-per-row.
+
+    An objective-name allow-list alone is not sufficient. ``reg:squarederror``
+    with ``num_target=2`` is a supported objective that produces ``(N, 2)``
+    margins; a scalar predictor accepts such a model and returns confident
+    wrong numbers. So arity is checked separately, on the fields that
+    actually determine it. See D017 and D037.
+
+    All four gate fields are JSON *strings* in the serialized model, and
+    ``field`` / ``value`` record them as found rather than coerced -- an
+    integer comparison against a string silently never fires, which would
+    disable the gate rather than trip it.
+
+    Attributes:
+        field: The gate field that failed (e.g. ``"num_target"``).
+        value: The value found, as it appeared in the model.
+        expected: A human-readable description of what was required.
+        location: Where the field was read from, or ``None`` for a per-tree
+            field with no single location.
+    """
+
+    def __init__(
+        self,
+        field: str,
+        value: object,
+        expected: str,
+        location: str | None = None,
+    ) -> None:
+        self.field = field
+        self.value = value
+        self.expected = expected
+        self.location = location
+        where = f" at {location}" if location else ""
+        super().__init__(
+            f"unsupported model shape: {field}={value!r}{where}, expected {expected}"
+        )
+
+
+class CategoricalSplitError(XGBoostBridgeError):
+    """Raised when a model contains a categorical split.
+
+    Categorical features are out of scope for format version 1, and reading
+    one as numeric is a wrong-number path for two independent reasons: a
+    categorical split *inverts* the child convention -- the in-set branch is
+    the right child, the opposite of a numeric split -- and its entry in
+    ``split_conditions`` is the smallest positive subnormal float32 rather
+    than a threshold.
+
+    Attributes:
+        signals: The detection signals that fired. Three independent signals
+            exist and all are checked, because this is a refusal test where
+            redundancy costs nothing.
+    """
+
+    def __init__(self, signals: tuple[str, ...]) -> None:
+        self.signals = signals
+        super().__init__(
+            "model contains categorical splits, which format version 1 does "
+            f"not support (signals: {', '.join(signals)})"
+        )
+
+
+class MissingFeatureNamesError(XGBoostBridgeError):
+    """Raised when a model carries no feature names.
+
+    A model fit from a bare array serializes ``feature_names`` as ``[]``
+    while ``num_feature`` is nonzero. Exporting it would produce an artifact
+    whose strict-key policy has no keys to be strict about -- which reads as
+    enforced and is not, so a caller's typo would go undetected. The caller
+    must supply names explicitly. See D021.
+
+    Attributes:
+        num_feature: The feature count the model reports, so the caller
+            knows how many names to supply.
+    """
+
+    def __init__(self, num_feature: int) -> None:
+        self.num_feature = num_feature
+        super().__init__(
+            f"model carries no feature names but reports {num_feature} "
+            "features; supply feature names explicitly to export it"
+        )
+
+
+class AmbiguousTreeCountError(XGBoostBridgeError):
+    """Raised when an early-stopped model's effective tree count is ambiguous.
+
+    The correct tree count is not a property of the model. The same file
+    loaded as a bare ``Booster`` uses every tree; loaded through a
+    scikit-learn estimator it uses only the first ``best_iteration + 1``
+    iterations. Measured divergence between the two readings reaches 1.55 in
+    margin space, and no field in the serialized model distinguishes them.
+    Choosing either reading would be silently wrong for half of callers, on
+    every row. See D038.
+
+    Attributes:
+        best_iteration: The recorded best iteration.
+        effective_trees: Tree count implied by truncating at
+            ``best_iteration``, taken from ``iteration_indptr``.
+        total_trees: Tree count actually present in the model.
+    """
+
+    def __init__(
+        self, best_iteration: int, effective_trees: int, total_trees: int
+    ) -> None:
+        self.best_iteration = best_iteration
+        self.effective_trees = effective_trees
+        self.total_trees = total_trees
+        super().__init__(
+            f"model stopped early at iteration {best_iteration} "
+            f"({effective_trees} trees) but carries {total_trees} trees, and "
+            "which count applies depends on how the model is loaded rather "
+            "than on the model itself; slice it explicitly with "
+            f"booster[0:{best_iteration + 1}] and export the result"
+        )
+
+
+class InterceptMismatchError(XGBoostBridgeError):
+    """Raised when the derived intercept disagrees with XGBoost's own output.
+
+    Validated against XGBoost's observed zero-tree margin rather than
+    against a re-derivation of the export recipe. A check that re-derives
+    its own recipe cannot fire on a recipe error, which is the class of
+    error it exists to catch -- an earlier version of this check was blind
+    in exactly that way and passed a real ``base_score`` clamping defect.
+    See D034.
+
+    Attributes:
+        derived: The intercept this library computed.
+        observed: The margin XGBoost produced for a zero-tree model with the
+            same configuration.
+        objective: The objective in play, since the transform is
+            per-objective.
+    """
+
+    def __init__(self, derived: object, observed: object, objective: str) -> None:
+        self.derived = derived
+        self.observed = observed
+        self.objective = objective
+        super().__init__(
+            f"derived intercept {derived!r} does not match XGBoost's observed "
+            f"zero-tree margin {observed!r} for objective {objective!r}"
+        )
+
+
+class MalformedTreeError(XGBoostBridgeError):
+    """Raised when a tree's structure is not what any probe measured.
+
+    Distinct from :class:`UnsupportedModelShapeError`, which is about output
+    *arity* -- a model that is well-formed but produces more than one value
+    per row. This error means the tree representation itself does not match
+    the layout recorded in ``probes/tree_structure.md``: arrays of unequal
+    length, an absent field, a child index that does not point forward, a
+    non-finite threshold, or a dead-node marker that disagrees with
+    reachability.
+
+    Such a disagreement is not a model this library declines to support; it
+    is a model whose shape contradicts the evidence the reader was built
+    from. Continuing would mean walking a structure under assumptions
+    already known to be false, which is how a plausible wrong number is
+    produced.
+
+    Attributes:
+        field: The field whose value contradicted the expected layout.
+        value: The value found.
+        expected: A human-readable description of what the layout requires.
+        location: Where the field was read from, or ``None`` if not
+            applicable.
+    """
+
+    def __init__(
+        self,
+        field: str,
+        value: object,
+        expected: str,
+        location: str | None = None,
+    ) -> None:
+        self.field = field
+        self.value = value
+        self.expected = expected
+        self.location = location
+        where = f" at {location}" if location else ""
+        super().__init__(
+            f"malformed tree structure: {field}={value!r}{where}, expected {expected}"
+        )

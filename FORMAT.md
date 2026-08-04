@@ -246,8 +246,18 @@ This field is load-bearing and was previously absent from this specification. Fl
 | Objective | Rule |
 |---|---|
 | `reg:squarederror` | `f32(base_score)`. No clamp |
-| `survival:cox` | `log(f32(base_score))`. No clamp — verified at `1e-38` and `1e38` |
-| `binary:logistic` | **Clamp `p` to `[f32(1e-6), f32(1 - 1e-6)]` first**, then `-log(f32(f32(1/p) - 1))` |
+| `survival:cox` | **float32** `log(f32(base_score))`. No clamp — verified across 34 values from `1.4e-45` to `3.4e38` |
+| `binary:logistic` | **Clamp `p` to `[f32(1e-6), f32(1 - 1e-6)]` first**, then **float32** `-log(f32(f32(1/p) - 1))` |
+
+**The logarithm is a float32 logarithm in both cases, not a float64 logarithm narrowed afterwards.** In Python that is `np.log` applied to a float32; it is *not* `np.float32(math.log(float(x)))`. The two differ, and only the float32 route matches XGBoost.
+
+> **Why this is called out, and how it was nearly missed.** The two routes disagree on only **0.055%** of float32 inputs, so a sweep that samples ordinary values finds nothing. Two separate sweeps — one of 79 values, one of 1432 — both concluded "no difference," and one of them explicitly recorded logistic as unaffected.
+>
+> Isolating the discriminating values first and *then* asking XGBoost settles it immediately. Of 13,421,774 float32 values in `[0.4, 1.2]`, 7387 make the two routes disagree. On a 120-value sample of those, for Cox: the float32 log matches XGBoost **120/120** and the float64 route **0/120**. For logistic, on 75 disagreeing values: **75/75** versus **0/75**.
+>
+> The lesson is methodological and applies to every numerical check in this repository: a sample that does not deliberately target the cases where two candidate implementations differ cannot distinguish them, and its silence is not evidence of equivalence. Rare-but-systematic is the signature this project exists to catch.
+
+Getting this wrong does not merely shift a digit — because §6.2 requires the derived intercept to match XGBoost's observed margin **bit-for-bit**, a float64 logarithm makes export raise spuriously on roughly one in two thousand models, with no indication that the rule rather than the model is at fault.
 
 > **Why the clamp, and why it is easy to miss.** XGBoost clamps `base_score` before deriving the logistic intercept **but stores the value unclamped.** Applying the recipe to the stored value is wrong by up to **13.8 in margin space**. Independently verified: at `base_score=1e-12` the unclamped recipe gives `-27.631021` where XGBoost's intercept is `-13.815510`; at `1e-7`, `-16.118095` versus `-13.815510`; at `0.9999999`, `15.942385` versus `13.745160`. Clamping first reproduces XGBoost exactly in every case. Additionally `base_score = 1 - 1e-10` stores as `[1E0]`, where the unclamped recipe raises `math domain error` outright.
 
@@ -460,9 +470,23 @@ Correct implementation: **5000/5000 bit-exact against `predict(output_margin=Tru
 
 ### 10.1 Verification of the two narrowing sites
 
-Narrowing at parse time (§9.2) and narrowing after each add (§10) overlap: the second partially absorbs the first. Per D019 each site is verified **in isolation** — reverted one at a time, never as a pair — and if a site cannot be made to fail on its own, that is reported rather than covered by a test that proves nothing.
+Per D019 each narrowing site is verified **in isolation** — reverted one at a time, never as a pair — and if a site cannot be made to fail on its own, that is reported rather than covered by a test that proves nothing.
 
-This is a real effect, not a hypothetical: during Phase 2 review, a variant that left leaf values un-narrowed still scored 5000/5000 because per-add narrowing absorbed it, contradicting the stronger independence claim in `probes/accumulation.md` §3.
+**There are five float32 sites in the walk, not two:** the sample cast and the threshold cast in the comparison, the leaf cast and the accumulator wrap on the add, and the intercept cast. Measured revert results, each site reverted alone:
+
+| Site | Tests red | Rows wrong |
+|---|---|---|
+| sample cast | 2 | 126/629 |
+| threshold cast | 1 | 96/464 |
+| leaf cast | 2 | 980/2000 |
+| intercept cast | 2 | 35/2000 |
+| accumulator wrap | **0** | — |
+
+The accumulator wrap is a **provable** no-op rather than an unmeasured one: given the leaf cast and the intercept cast, both operands of that addition are already float32, and wrapping a float32 result in another narrowing changes no bit. No input can make it fail while the other two stand, so any test claiming to pin it would be decorative. It is retained as defence-in-depth and disclosed here, which is what this section requires. What *is* load-bearing — the accumulator staying float32 across every add — is pinned by the float64-running-sum variant at 473/2000.
+
+> **A correction, because the earlier version of this section drew the wrong conclusion.** It stated that leaf narrowing was absorbed by per-add narrowing, citing a variant that still scored 5000/5000. That absorption is an artefact of **NumPy's NEP 50 weak-scalar promotion**, not a property of the arithmetic: it holds only while the un-narrowed values arrive as *weak* Python floats. Handed a strong `dtype=np.float64` array, leaf narrowing is not absorbed at all and 980/2000 rows come back wrong, which is the regime `probes/accumulation.md` §6 measured at 990–3706/5000.
+>
+> The practical consequence for tests, and it is easy to get wrong: a harness that feeds the walk Python floats masks **four of the five sites**, because whichever operand still carries a float32 drags the whole operation into float32. Pinning a cast requires handing the walk a **strong float64** input — an `np.float64` row or a `dtype=np.float64` value array — so that the cast is the only thing keeping the operation in float32. `np.float64(0.1) < np.float32(0.1)` is `True` while `np.float32(0.1) < np.float32(0.1)` is `False`; that one row is the whole difference between a test that pins the invariant and one that merely appears to.
 
 ---
 
@@ -500,7 +524,13 @@ Zero-boosting-round models serialize `"trees": []` — **present and empty, neve
 
 **XGBoost version (D018).** Raise unless the producing version is in the tested list in `COMPAT.md`.
 
-**Early stopping (D023).** An early-stopped model serializes `best_iteration` while **all** trees remain in `trees[]`. Which tree count applies is not decided by design; it is measured in Phase 4 against XGBoost's own `predict()`. Until that measurement lands, export raises on a model carrying `best_iteration`.
+**Early stopping (D038).** Raise when `iteration_indptr[best_iteration + 1] != len(trees)`, reading `best_iteration` from `learner.attributes.best_iteration` (a JSON string) and `iteration_indptr` from `learner.gradient_booster.model.iteration_indptr`. The error directs the caller to slice the model explicitly — `booster[0:best_iteration + 1]` — and re-export.
+
+> **Why refusal rather than a choice.** The effective tree count is not a property of the model. Measured on one file on disk: loaded as a bare `Booster` it matches a walk over **all** trees 2500/2500; loaded through a scikit-learn estimator it matches a walk over `best_iteration + 1` **iterations** 2500/2500. Max divergence between the two readings is `1.55` in margin space, and **no field in the model distinguishes them**. Either choice is silently wrong for half of callers, on every row.
+>
+> The predicate is deliberately not "`best_iteration` is present." With `early_stopping_rounds` set but never fired, both readings agree, and refusing on presence alone would reject unambiguous models.
+>
+> Not version-dependent — re-measured byte-identical on XGBoost 3.4.0. It is API-path-dependent, which a version ceiling cannot defend against; only refusal can.
 
 **Neutralization self-check (§8.3).** Raise if any neutralized tree's walk disagrees with `predict(output_margin=True)`, and raise if the reachability marking disagrees with the `split_indices == 2147483647` marker.
 
@@ -589,7 +619,7 @@ Each omission is a decision, and none of these fields is reserved for later (D00
 | `tree_info` | v1 has exactly one output group (D017), so it would be uniformly `0`. Grouping lives *outside* tree objects in XGBoost, so adding it later is additive and needs no restructuring (`probes/multiclass_extensibility.md` §4) |
 | `weight_drop` | dart is refused (D016). No tree-weight array exists in this format |
 | `leaf_weights`, vector leaves | `size_leaf_vector == 1` is required (§11) |
-| `best_iteration` | Export raises on it pending Phase 4 measurement (D023) |
+| `best_iteration` | Models with an ambiguous tree count are refused outright (D038, §11), so there is no ambiguous count for an artifact to record |
 | `missing=` parameter | Not recorded in the source model at all (`probes/tree_structure.md` §6.2), so it cannot be preserved. `NaN` is the missing value |
 | `learner.attributes` | Nondeterministic; whitelist is empty (D020, §12) |
 | Reserved space for multi-class, multi-target, categorical, dart | D003. The version marker is the migration mechanism |

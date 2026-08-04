@@ -518,3 +518,62 @@ Max absolute divergence between the two readings: `1.55`. **No field in the arti
 **Not version-dependent.** Re-measured on XGBoost 3.4.0: every number byte-identical, 50 key paths identical, no relocation. The behavior is API-path-dependent, which is worse — a version ceiling cannot defend against it, only refusal can.
 
 **Unmeasured and recorded as such:** the `save_best=True` callback. If it trims the model, the predicate is satisfied and export proceeds — which is safe, because a satisfied predicate means both readings coincide.
+
+---
+
+## D039 — The `base_score` clamp bounds are pinned, and the earlier approximation was already exact
+
+*2026-08-02* — **confirms D035; no numeric change**
+
+The logistic clamp bounds, pinned to adjacent float32 pairs by exhaustive search rather than bracketed:
+
+| Bound | Last value inside | First value outside | Saturated intercept |
+|---|---|---|---|
+| Lower | `1.0000001111620804e-06` (`0x358637BE`) | `1.0000002248489182e-06` (`0x358637BF`) | `-13.815509796142578` (`0xC15D0C54`) |
+| Upper | `0.9999988675117493` (`0x3F7FFFED`) | `0.999998927116394` (`0x3F7FFFEE`) | `13.745160102844238` (`0x415BEC2D`) |
+
+Over a 226-value sweep the pinned clamp and D035's approximate `[f32(1e-6), f32(1 - 1e-6)]` scored **226/226 each, value for value**, against **52/226** for no clamp. **The approximation was already exact.** The source literal is pinned only to an equivalence class — 8 admissible values for the lower bound, 2 for the upper — and every member gives bit-identical intercepts on every float32 input, so the choice has no observable consequence.
+
+Measured behaviour at the extremes, which the exporter must reproduce or refuse rather than guess: `0.0`, `-0.0`, the minimum subnormal, and `1.0` are all **accepted** and clamp to a saturated intercept. Negative values and values `> 1` **raise** at fit *and* at load. `nan` and `inf` **raise** in the JSON parser. `-inf` is **accepted and silently stored as `[0E0]`** — the one asymmetry, and worth knowing because it is the only non-finite input that does not announce itself.
+
+Cox and regression are unclamped, confirmed across 34 values from `1.4e-45` to `3.4e38` and 25 values spanning `±3.4e38`.
+
+---
+
+## D040 — Both intercept logarithms are float32 logarithms
+
+*2026-08-02* — **amends D015 and D035**
+
+`np.log` applied to a float32, for both `survival:cox` and `binary:logistic`. **Not** `np.float32(math.log(float(x)))`.
+
+**Why this was nearly missed, and the methodological rule it produces.** The two routes disagree on only **0.055%** of float32 inputs. Two independent sweeps — 79 values and 1432 values — both concluded "no difference," and one explicitly recorded logistic as unaffected.
+
+Isolating the disagreeing inputs first and *then* asking XGBoost settles it immediately. Of 13,421,774 float32 values in `[0.4, 1.2]`, 7387 make the routes differ. On a 120-value sample of those, Cox: float32 log **120/120**, float64 route **0/120**. On 75 disagreeing values for logistic: **75/75** versus **0/75**.
+
+**The rule: a sample that does not deliberately target the inputs where two candidate implementations diverge cannot distinguish them, and its silence is not evidence of equivalence.** Find the disagreeing inputs, then consult the oracle. This is the independent-oracle principle of D034 applied to sampling rather than to comparison.
+
+**Cost of getting it wrong:** because D034 requires the derived intercept to match XGBoost's observed margin bit-for-bit, the float64 route makes export raise spuriously on roughly one model in two thousand, with nothing to indicate the rule rather than the model is at fault.
+
+---
+
+## D041 — Two error classes for two different failures
+
+*2026-08-02*
+
+`MalformedTreeError` means a structure that contradicts the evidence the reader was built from: unequal array lengths, an absent field, a child index that does not point forward, a non-finite threshold, a dead-node marker disagreeing with reachability, a `split_type` array shorter than the node count.
+
+`UnsupportedModelShapeError` means a well-formed model whose **output arity** this version declines to support: `num_target`, `num_class`, `size_leaf_vector`, and feature-name count or uniqueness.
+
+**Why separate them.** They call for different responses. An arity refusal is a scope statement — the model is fine and a later version may support it. A malformed-structure refusal says the reader's assumptions have already been violated, so continuing would walk a structure under premises known to be false. Collapsing both into one class tells a caller "unsupported" when the truth is "unrecognized," and those warrant different bug reports.
+
+---
+
+## D042 — Concurrent agents must not run the shared suite while another is mid-write
+
+*2026-08-02*
+
+An agent working on one module runs only its own test file during development, and the full suite once at the end. Where two agents' work must both be verified against the whole suite, they are serialized.
+
+**Why:** two agents editing disjoint modules still share one test suite. One reported an intermittent failure in the other's test file at roughly 1 run in 25 — a test that is fully deterministic, with a hand-built fixture and no randomness or shared state. Re-measured after both finished: **0 failures in 40 isolated runs and 24 full-suite runs.** The observation was a torn read — the suite imported a module mid-write, so a test asserting a guard ran against a version that did not yet have it.
+
+The cost of misdiagnosing this is high in both directions: chasing a nonexistent race, or dismissing a real flake as "probably concurrency." Neither is acceptable in a project whose entire premise is that intermittent wrongness is the dangerous kind.

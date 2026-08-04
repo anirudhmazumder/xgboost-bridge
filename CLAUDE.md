@@ -39,7 +39,7 @@ Python is a `uv` workspace with members `packages/python` and `fixtures`. JavaSc
 
 XGBoost's engine compares features against thresholds in **float32**. Exported threshold values are the shortest decimal that round-trips in float32 — not a bit-identical float64.
 
-Cast **both sides** of every comparison, and the operator is **strict `<` with equality routing RIGHT** (measured on 216/216 nodes):
+Cast **both sides** of every comparison, and the operator is **strict `<` with equality routing RIGHT** — measured on 104/104 internal nodes of the primary model plus every internal node of seven further models:
 
 ```python
 np.float32(value) < np.float32(threshold)
@@ -71,6 +71,10 @@ Every deviation was measured and every one loses: intercept added last scores 19
 - `reg:squarederror` — identity.
 - `survival:cox` — `log(f32(base_score))`.
 - `binary:logistic` — `-log(f32(f32(1/p) - 1))`, and **`p` is clamped to `[f32(1e-6), f32(1 - 1e-6)]` before the transform while being stored unclamped.** The unclamped recipe is wrong by up to **13.8 in margin space** at extreme `base_score`, and raises `math domain error` at `base_score = 1 - 1e-10`, which stores as `[1E0]`.
+
+**Both logarithms are float32 logarithms** — `np.log` of a float32, **not** `np.float32(math.log(float(x)))`. The two routes differ on only 0.055% of float32 inputs, which is why two independent sweeps (79 values and 1432 values) both concluded "no difference." Targeting the disagreeing values instead settles it: for Cox the float32 log matches XGBoost 120/120 and the float64 route 0/120; for logistic, 75/75 versus 0/75. Because export requires bit equality against XGBoost's own margin, the float64 route makes export raise spuriously on roughly one model in two thousand.
+
+> **The general lesson, which applies to every numerical check here:** a sample that does not deliberately target the inputs where two candidate implementations diverge cannot distinguish them, and its silence is not evidence of equivalence. Find the disagreeing inputs first, then ask XGBoost.
 
 **`boost_from_average` selects the intercept space and is load-bearing.** At `learner.learner_model_param.boost_from_average`. With **zero trees and `boost_from_average == "1"`, the margin is the RAW `base_score`**, not the link transform — logistic default gives `0.5` where the link gives `-0.0`; Cox default gives `0.5` where the link gives `-0.693147`.
 
