@@ -68,8 +68,26 @@ is a refusal test and redundancy there is free. (FORMAT.md §11)
 
 **Output arity is checked, not just the objective name.** Export requires
 **all** of: the objective is in the supported set above, `num_target ==
-"1"`, `size_leaf_vector == "1"`, and `num_class == "0"`. Anything else
-raises. (D017)
+"1"`, `num_class ∈ {"0", "1"}`, and `size_leaf_vector == "1"` for **every
+tree** — a model with zero trees passes this last check vacuously. All four
+gate fields, `objective.name` included, are JSON strings and are compared
+as strings; an integer comparison silently never fires (`num_class == 0` is
+`False` against the string `"0"`). Anything else raises. (D017, amended by
+D037)
+
+**Why `num_class` admits `"1"`:** verified across all three in-scope
+objectives that `num_class=1` produces the *same* single-output model as
+`num_class="0"` — trees byte-identical, margins bit-identical 400/400,
+`predict()` shape `(400,)` — and that requiring `"0"` rejected all three. A
+false rejection reads as correct strictness and is not, which is worse.
+Relaxing to `{"0", "1"}` admitted nothing extra across a 23-shape table with
+zero false acceptances. (D037, `probes/arity_gate.md`)
+
+**Why `size_leaf_vector` is checked per tree:** the field exists only inside
+each tree's `tree_param`, never at the model level — a zero-tree model has
+zero occurrences of it anywhere in the document. Without the vacuous-pass
+rule for zero trees, the gate would reject every zero-round model that this
+format is otherwise required to export. (D037)
 
 *Why arity is checked separately from the objective name:* an
 objective-name allow-list alone has a hole. `reg:squarederror` with
@@ -99,12 +117,28 @@ transform applied to the running score's intercept has no runtime
 representation at all. Both language test suites assert that nothing
 branches on `objective`, so this cannot silently regress. (D028)
 
+## `base_score` is clamped before the logistic intercept transform
+
+For `binary:logistic`, XGBoost clamps `base_score` to `[f32(1e-6), f32(1 -
+1e-6)]` before deriving the margin intercept, but **stores the value
+unclamped**. This library's exporter reproduces the clamp; applying the
+intercept recipe to the stored value without it is wrong by up to `13.8` in
+margin space. (D035)
+
+**What this means for a caller:** if you pass an extreme `base_score` —
+very close to `0` or to `1` — and hand-derive `logit(base_score)` yourself
+to compare against this library's exported `intercept`, expect a large
+difference. This library's value is the one that matches XGBoost's own
+observed zero-tree margin for the same configuration; the unclamped `logit`
+of the stored value does not.
+
 ## XGBoost version support boundary
 
 The empirical behaviors this library depends on — float32 threshold
 representation, per-objective `base_score` space, DART detection, gblinear
-determinism — were established against **XGBoost 3.3.0**, and that is the
-version verification runs against by default. (D001)
+determinism, and the output-transform clamp constants (D032) — were
+established against **XGBoost 3.3.0**, and that is the version verification
+runs against by default. (D001)
 
 **The support policy is an enumerated list of versions actually probed, not
 a range.** (D018) The exporter raises unless the artifact's version marker
@@ -195,64 +229,85 @@ here as an upstream hazard rather than a defect in this library.
 
 **This library's probability/hazard output is not guaranteed to match
 XGBoost's bit-for-bit, by design.** Margins are float32 throughout this
-library's prediction path, but the final output-space transform — margin to
+library's prediction path, and the final output-space transform — margin to
 probability for `binary:logistic`, margin to hazard ratio for
-`survival:cox` — is computed in **float64 on both sides**, in both Python
-and JavaScript, and the result is not narrowed back to float32. Widening is
-necessary: JavaScript has no float32 `exp`, and `Math.fround(Math.exp(x))`
-is a float64 exponential rounded once, which is not the value a genuine
-float32 exponential would produce. A float32 output transform is therefore
-not reproducible in the JavaScript runtime at all, and specifying one would
-make exact cross-language parity at the output stage unreachable by
-construction. (D026, FORMAT.md §5.1)
+`survival:cox` — is evaluated under **float32 semantics** as well:
+`np.float32(...)` wraps every intermediate in Python, `Math.fround(...)`
+wraps every intermediate in JavaScript. This transform also reproduces
+XGBoost's own clamps at the output — see the next section. (D032, FORMAT.md
+§5.1, §5.2)
 
-Widening to float64 is **necessary but not sufficient** for exact
-cross-language agreement at the output stage — see the next section for why,
-and for what closes the remaining gap. The margin computation itself is
-unaffected by any of this and stays in the low `1e-7` range against
-XGBoost.
+**Why not float64, which an earlier version of this document specified.**
+XGBoost transforms in float32 **with clamps**. A float64 transform is not
+off by a ULP in the tail there — it is qualitatively wrong: **relative
+error `1.0`** below the logistic clamp floor, and finite-versus-`inf` for
+Cox. Measured: `400/400` bit-exact for float32-throughout against `236/400`
+for float64-then-narrow, and on all `164` rows where the two hypotheses
+disagree, XGBoost matches float32 `164/164` and float64 `0/164`. Divergence
+from upstream that is itself silent is exactly what this library exists to
+surface, so upstream is matched in the tail rather than diverged from
+quietly. (D032, superseding D026's precision requirement)
+
+The margin computation itself is unaffected by any of this and stays in the
+low `1e-7` range against XGBoost.
 
 ## The output transform is bundled, not the platform's
 
 The margin-to-probability transform for `binary:logistic` and the
 margin-to-hazard-ratio transform for `survival:cox` are implemented from
-scratch in both packages. Neither package calls a platform transcendental on
-the prediction path — no `Math.exp`, no `math.exp`, no `np.exp`. (D030)
+scratch in both packages, evaluated under float32 semantics (previous
+section). Neither package calls a platform transcendental on the prediction
+path — no `Math.exp`, no `math.exp`, no `np.exp`. (D030, amended by D032 for
+evaluation precision)
 
 **Why this exists, briefly, because it changes what a caller will observe:**
-widening the transform to float64 on both sides (previous section) delivers
-bit-identical *inputs* to `exp`, but that is not sufficient for a
-bit-identical *result*. IEEE-754 mandates correct rounding only for
-`+ − × ÷ √` and fused multiply-add; `exp` is not required to be correctly
-rounded, and no two `libm` implementations agree with each other. Measured
-on one platform pair, V8 against Apple `libm`: **4.2%** of sigmoid
-evaluations and **9.6%** of `exp` evaluations differed, by up to **2 ULP**.
-Cross-language parity in this library is required to be exactly `0.0`, with
-no tolerance, at both the margin and the final output — and no honest
-tolerance number exists to paper over this, because the 2-ULP figure was
-measured on exactly one platform pair. glibc is a third `libm`
+even with bit-identical float32 inputs on both sides, calling a platform
+`exp` would not give a bit-identical *result*. IEEE-754 mandates correct
+rounding only for `+ − × ÷ √` and fused multiply-add; `exp` is not required
+to be correctly rounded, and no two `libm` implementations agree with each
+other. Measured on one platform pair, V8 against Apple `libm`: **4.2%** of
+sigmoid evaluations and **9.6%** of `exp` evaluations differed, by up to
+**2 ULP**. Cross-language parity in this library is required to be exactly
+`0.0`, with no tolerance, at both the margin and the final output — and no
+honest tolerance number exists to paper over this, because the 2-ULP figure
+was measured on exactly one platform pair. glibc is a third `libm`
 implementation, and recent glibc is correctly rounded where V8's is not, so
 a Linux runner would show a different divergence than the pair actually
 measured, and neither measurement bounds the other. The resolution is to
 stop calling any platform `exp` at all: both packages implement `sigmoid`
-and `exp` from correctly-rounded primitives, so Python and JavaScript
-execute an identical sequence of IEEE-754 double operations and agree
-bit-for-bit by construction. The full argument, including why a tolerance
-was rejected on evidence rather than principle, is recorded in D026's
-2026-08-02 correction and in D030; it is not repeated here.
+and `exp` from `+ − × ÷` and exact power-of-two scaling, narrowing every
+intermediate to float32, so Python and JavaScript execute an identical
+sequence of operations under float32 semantics and agree bit-for-bit by
+construction. The full argument, including why a tolerance was rejected on
+evidence rather than principle, is recorded in D026's 2026-08-02
+correction, in D030, and in D032's precision correction; it is not repeated
+here.
 
 **What this means for a caller:**
 
 - **This is a bundled implementation, not the platform's.** If you compute
   `scipy.special.expit(margin)` or `1/(1+Math.exp(-margin))` yourself and
   compare it against this library's output, expect differences in the last
-  bit or two of the result. That is expected and intentional — this is
-  where to find out why, rather than filing it as a bug.
+  bit or two of the result **inside the clamped range**. That is expected
+  and intentional — this is where to find out why, rather than filing it as
+  a bug.
+- **Outside the clamped range, this library reproduces XGBoost's clamps and
+  a naive float64 computation will not.** `binary:logistic` floors at
+  margin `f32(-88.7)`, returning exactly `3.006635794144578e-39` and never
+  `0.0`; a float64 sigmoid on the same margin has **relative error `1.0`**
+  against that floor. `survival:cox` has no clamp and returns `+inf` above
+  margin ≈ `88.72`, where a float64 `exp` returns a large but finite
+  number. (D032)
+- **The clamp constants are XGBoost internals, not part of any published
+  specification, and are version-sensitive** in the same way `weight_drop`
+  is (see the version boundary section below). They are re-verified
+  whenever the tested-version list widens. (D032)
 - **This library's probability or hazard-ratio output also differs from
-  XGBoost's own output** by roughly 1–2 ULP, by construction, because
-  XGBoost performs its output-space transform in C++ `libm` and this
-  library does not call `libm` at all. This is expected, is bounded well
-  inside the `1e-6` gate, and is not a regression.
+  XGBoost's own output** by roughly 1–2 ULP inside the clamped range, by
+  construction, because XGBoost performs its output-space transform in C++
+  `libm` and this library does not call `libm` at all. This is expected and
+  is not a regression; see the accuracy-gate section below for how it is
+  measured.
 - **The margin-level comparison against XGBoost is unaffected** and stays in
   the low `1e-7` range described above. Only the post-transform output —
   probability or hazard ratio — is involved.
@@ -260,6 +315,36 @@ was rejected on evidence rather than principle, is recorded in D026's
   untouched.** The bundled transform is written from plain arithmetic
   (`+ − × ÷` and exact power-of-two scaling), not a library, so it adds no
   entry to `dependencies`. (D009, D030)
+
+## The Python-vs-XGBoost accuracy gate is relative; cross-language parity is exact and separate
+
+Two different comparisons exist here, and this document keeps them apart —
+conflating them is how a tolerance leaks into the parity gate. (D033)
+
+- **Python vs XGBoost, margin:** **absolute**, ≤ `1e-6`. Measured `0.0`
+  bit-exact at every sweep configuration probed; treat any regression from
+  that as a defect to diagnose, not headroom to spend.
+- **Python vs XGBoost, output** (probability or hazard ratio): **relative**,
+  ≤ `1e-6`, computed against XGBoost's value. Explicit rules for the rows
+  that otherwise fall out of a naive ratio comparison: `±inf` must match as
+  bit patterns and is never divided; `NaN` on either side is always a
+  failure, never silently skipped, because `NaN` compares unequal to
+  everything including itself; where XGBoost's value is exactly `0.0` or
+  `-0.0`, the comparison is bit-pattern equality rather than a ratio. The
+  harness reports **max** relative error and the row that produced it,
+  never a mean.
+- **Cross-language parity** (Python vs JavaScript, checked at both the
+  margin and the output) is a **separate gate with no tolerance at all** —
+  exactly `0.0`, bit-identical, at both measurement points. It is not the
+  same check as the accuracy gate above and carries none of its tolerance.
+
+**Why the output gate is relative rather than absolute.** `survival:cox`'s
+output is a hazard ratio spanning `2.85e-04` to `7.56e+08` — an absolute
+bound there is meaningless. Measured absolute error against XGBoost reaches
+`6.96e+23` (with rows at `+inf`) while the max relative error is `5.7e-08`.
+The mirror-image failure hits `binary:logistic`: it would pass an absolute
+`1e-6` bound trivially in the clamp tail while being relatively `100%`
+wrong there, the exact case a float64 transform produces. (D033)
 
 ## What this document does not yet cover
 
@@ -269,11 +354,5 @@ than guessed at:
 
 - Release and publishing mechanics (PyPI trusted publishing, npm
   provenance) — no publish workflow exists in this repository yet.
-- Two evidence gaps are currently blocking and under active probe
-  (`FORMAT.md` §14): the exact objective-to-output-transform pairing and
-  XGBoost's internal output-transform precision for `binary:logistic` and
-  `survival:cox`, and whether `num_class` can legitimately be `"1"` (as
-  opposed to `"0"`) for a single-output binary model. Neither is resolved
-  here; this document will be updated once each lands.
 - AI-authorship disclosure text — deferred to the 1.0 announcement per D012,
   not part of this compatibility policy.

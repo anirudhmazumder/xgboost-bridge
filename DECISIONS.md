@@ -164,7 +164,7 @@ Test files under `packages/js/test/` are `.js`, executed directly by `node --tes
 
 ## D015 — The artifact stores a derived margin intercept, not `base_score`
 
-*2026-08-01*
+*2026-08-01* — **still stands; amended by D035** (clamp before transform) and its export assertion **SUPERSEDED by D034** (independent oracle).
 
 The artifact carries exactly **one operative numeric intercept**: the margin-space intercept, already transformed, as a float32 value. Predictors add it and never transform it.
 
@@ -201,7 +201,7 @@ A model trained as `dart` with `rate_drop=0`/`skip_drop=0` is byte-identical to 
 
 ## D017 — The export gate checks output arity, not just the objective name
 
-*2026-08-01*
+*2026-08-01* — **still stands, amended by D037**: `num_class` admits `"1"`, `size_leaf_vector` is per-tree, and all fields compare as strings.
 
 Export requires **all** of: objective in the supported set, `num_target == "1"`, `size_leaf_vector == "1"`, and `num_class == "0"`. Anything else raises.
 
@@ -305,7 +305,7 @@ Measured: 5000/5000 bit-exact against `predict(output_margin=True)`, max abs err
 
 ## D026 — The output transform runs in float64 on both sides, and parity is measured twice
 
-*2026-08-01*
+*2026-08-01* — **precision requirement SUPERSEDED by D032.** The two-measurement-point rule and the float32-margin rule still stand; the float64 output transform does not.
 
 Margins are float32 throughout. The **output** transform — margin to probability or hazard ratio — widens to float64 on both sides and the result is not narrowed back.
 
@@ -371,7 +371,7 @@ The scrub runs as a test in the Python suite over all tracked source and documen
 
 ## D030 — Both packages bundle their own `sigmoid` and `exp`
 
-*2026-08-02*
+*2026-08-02* — **still stands, amended by D032**, which changes the evaluation precision to float32 and adds XGBoost's clamps. The decision to bundle rather than call `libm` is unchanged.
 
 Neither package calls a platform transcendental on the prediction path. No `Math.exp`, no `math.exp`, no `np.exp`. Both implement the transform from correctly-rounded primitives so that the two languages execute an identical sequence of IEEE-754 double operations and agree bit-for-bit **by construction**.
 
@@ -400,3 +400,94 @@ This is now the most dangerous code in the repository. Phase 5's adversarial-fix
 `mpmath` enters the workspace dev dependency group solely as the high-precision reference for validating the bundled transform (D030). It is **not** a runtime dependency of `xgboost-bridge`, does not appear in the published package's `dependencies` or in any extra, and has no JavaScript counterpart — the zero-runtime-dependency rule for `xgboost-predictor` is untouched.
 
 **Why a dependency at all,** given that adding one requires an explicit decision: validating a hand-written transcendental needs a reference more accurate than the thing being tested, and neither the standard library nor `numpy` provides arbitrary precision. Writing our own 50-digit reference to check our own transform would be circular.
+
+---
+
+## D032 — The output transform runs in float32 and reproduces XGBoost's clamps
+
+*2026-08-02* — **supersedes the precision requirement in D026 and amends D030**
+
+The bundled `sigmoid` and `exp` are evaluated under **float32** semantics: `np.float32(...)` per intermediate in Python, `Math.fround(...)` per intermediate in JavaScript. They reproduce XGBoost's measured clamps.
+
+**Why D026's premise dissolved.** D026 chose float64 because JavaScript has no float32 `exp`. That was true of `Math.exp` and stopped being true the moment D030 made the transform ours: a transform built from `+ − × ÷` and exact power-of-two scaling can be evaluated under float32 semantics deterministically in both languages.
+
+**Why float32 arithmetic can be simulated exactly.** A float64 operation followed by narrowing to float32 is *exact* for `+ − × ÷`, because float64 carries more than twice float32's significand and double-rounding cannot occur for those four operations. This is a property of the IEEE-754 formats, not an empirical result. It does not extend to `exp` — which is exactly why `exp` must be built from the four operations rather than called.
+
+**Why float64 was not merely imprecise but wrong.** XGBoost transforms in float32 with clamps. Verified: 400/400 bit-exact for float32-throughout versus 236/400 for float64-then-narrow, and on all 164 rows where the two hypotheses disagree XGBoost matches float32 **164/164** and float64 **0/164**. In the tail float64 is qualitatively wrong — relative error `1.0` below the logistic clamp floor, and finite-versus-`inf` for Cox. Divergence from upstream that is itself silent is the thing this library exists to surface, so upstream is matched in the tail rather than diverged from quietly.
+
+**Clamps, measured.** `binary:logistic` floors at margin `f32(-88.7)`, returning exactly `3.006635794144578e-39` and never `0.0`; the sole float32 input producing those bits is `-88.69999694824219`, found by exhaustive scan of all 262145 float32 values in `[-90, -88]`. `survival:cox` has no clamp and returns `+inf` above margin ≈ `88.72`. Consequence for fixtures: sigmoid saturation at exactly `1` is reachable, at exactly `0` is **not** — the clamp prevents it.
+
+**Clamp constants are XGBoost internals and version-sensitive** in the same way `weight_drop` proved to be. They fall under the D018 version ceiling and are re-probed whenever the tested version list widens.
+
+Cross-language parity stays exactly `0.0` at both measurement points; there is no `libm` in the path. Bit-exactness with XGBoost at the output remains unreachable and is not a goal — its own `expf` is not correctly rounded (an mpmath-exact reference scores 1600/2500 against it).
+
+---
+
+## D033 — The Python-vs-XGBoost output gate is relative; the margin gate stays absolute
+
+*2026-08-02* — **supersedes the absolute output-gate row**
+
+- Margin: **absolute** ≤ `1e-6`. Currently `0.0` bit-exact at all 16 measured sweep configurations; a regression from that is a defect to diagnose, not headroom.
+- Output: **relative** ≤ `1e-6`, against XGBoost's value.
+
+Explicit rules for the rows that otherwise vanish from the comparison: `±inf` must match as bit patterns and is never divided; NaN is always a failure on either side, because NaN compares unequal to everything including itself and a naive harness silently *skips* exactly those rows; where XGBoost's value is `0.0` or `-0.0`, require bit equality rather than a ratio. The harness reports **max** relative error and the row that produced it, never a mean.
+
+**Why:** an absolute output bound flags the wrong objective and misses the real defect. Cox output is a hazard ratio spanning `2.85e-04` to `7.56e+08`, so absolute error there is meaningless — measured `1.94` to `6.96e+23` plus `+inf` rows — while its relative error is `5.7e-08`. Meanwhile logistic passes an absolute gate trivially while being relatively 100% wrong below the clamp.
+
+**This concerns only the accuracy gate.** Cross-language parity is exact equality and no tolerance question touches it. The two are kept separate in the harness and in `CLAUDE.md`, because conflating them is how a tolerance leaks into the parity gate.
+
+---
+
+## D034 — Every check needs an oracle independent of what it checks
+
+*2026-08-02* — **supersedes D015's export assertion**
+
+Export validates the derived intercept against **XGBoost's own observed zero-tree margin**, not against a re-derivation of the export recipe.
+
+**Why the original check was decorative.** It compared the stored `base_score` against a re-derivation using the same recipe. Both sides ran the same code, so **an error in the recipe could not make it fire** — and D035's clamp defect is exactly such an error, which that check passed silently. A validation whose oracle shares the defect it looks for provides no information.
+
+Standing rule for this codebase. Before accepting any validation, state what its oracle is and why the oracle cannot share the defect. If the answer is "it compares our value to our other value," delete or replace the check.
+
+- Numerical implementations validate against a high-precision reference (`mpmath`, 50 digits), **per side, independently**. Cross-language agreement is a separate check and is never evidence of correctness: two identical implementations agreeing proves only that the code was written twice.
+- Export-side assertions validate against XGBoost's observed output.
+- Redundant safeguards are untested safeguards. If removing either of two overlapping protections breaks no test, neither is pinned. Test each independently or collapse them to one.
+
+---
+
+## D035 — `base_score` is clamped before the logistic intercept transform
+
+*2026-08-02* — **amends D015**
+
+For `binary:logistic`, clamp `p` to `[f32(1e-6), f32(1 - 1e-6)]` **before** applying `-log(f32(f32(1/p) - 1))`. Cox and regression are not clamped, verified at `1e-38` and `1e38`.
+
+**Why:** XGBoost clamps `base_score` before deriving the intercept but **stores it unclamped**. Applying the recipe to the stored value is wrong by up to **13.8 in margin space**. Independently verified: at `base_score=1e-12` the unclamped recipe gives `-27.631021` against XGBoost's `-13.815510`; at `1e-7`, `-16.118095` against `-13.815510`; at `0.9999999`, `15.942385` against `13.745160`. Clamping first reproduces XGBoost exactly in all cases. Additionally `base_score = 1 - 1e-10` stores as `[1E0]`, where the unclamped recipe raises `math domain error`.
+
+---
+
+## D036 — `boost_from_average` selects the intercept space
+
+*2026-08-02*
+
+Export reads `learner.learner_model_param.boost_from_average`. With **zero trees and `boost_from_average == "1"`**, XGBoost emits the **raw `base_score`** as the margin, with no link transform. Every model with at least one tree applies the transform.
+
+Verified: logistic default gives margin `0.5` where the link gives `-0.0`; Cox default gives `0.5` where the link gives `-0.693147`. Flipping that one string moves the margin between `0.5` and `-0.0`.
+
+The field is not carried in the artifact — it is an export-time input whose effect is already baked into `intercept`. Carrying it would invite a predictor to branch on it.
+
+**Consequence for the required signed-zero fixture:** it must pass `base_score = 0.5` **explicitly**. Built from the default it lands in the raw space and tests nothing, while looking exactly like a signed-zero fixture.
+
+---
+
+## D037 — Arity gate: `num_class ∈ {"0","1"}`, per-tree `size_leaf_vector`, string comparison
+
+*2026-08-02* — **amends D017**
+
+Require `num_target == "1"`, `num_class ∈ {"0", "1"}`, and `size_leaf_vector == "1"` for **every tree**, with a zero-tree model passing vacuously. All four gate fields, `objective.name` included, are JSON strings and are compared as strings.
+
+**Why `"1"` is admitted:** independently verified across all three in-scope objectives that `num_class=1` yields the *same* single-output model — trees byte-identical, margins bit-identical 400/400, `predict()` shape `(400,)` — and that requiring `"0"` **rejects all three**. A false rejection is worse than over-strictness because it reads as correct strictness and is not. Relaxing admitted nothing extra across a 23-shape table with zero false acceptances.
+
+**Why per-tree:** `size_leaf_vector` exists only in each tree's `tree_param`, never in `learner_model_param`. A model-level comparison has no referent, and a zero-tree model has zero occurrences — without the vacuous-pass rule the gate rejects every zero-round model.
+
+**Why string comparison:** `num_class == 0` is `False` against `"0"`. An integer comparison silently never fires, which would disable the gate rather than trip it.
+
+Zero-round models serialize `"trees": []` — present and empty, never absent, verified on all three objectives.

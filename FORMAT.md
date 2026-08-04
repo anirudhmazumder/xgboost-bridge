@@ -6,7 +6,7 @@ Every requirement here is traceable to measured evidence under `probes/` or to a
 
 Where this document says **MUST**, a conforming implementation that does otherwise is wrong, not merely different. There is no **SHOULD** in this specification; every rule is exact, because two implementations in two languages are written from it and must agree to exactly `0.0`.
 
-**Status:** approved, 2026-08-01. Every design decision is settled. What remains is measurement: two blocking evidence gaps in §14, resolved by probe before implementation begins.
+**Status:** approved 2026-08-01; corrected 2026-08-02 after two probes closed the blocking evidence gaps and falsified four rules as originally written. §14 records what changed. No open gaps block implementation.
 
 ---
 
@@ -90,30 +90,57 @@ This is the transform from margin space to the predictor's returned value. It is
 
 > **Why explicit.** Deriving it would mean that adding an objective later silently changes transform behavior through a shared code path, which is the shape of a silent-wrongness bug. Carrying it explicitly makes the reader's job a lookup with no inference, and lets export assert the objective/transform pairing — redundancy that costs nothing because it lives only in Python.
 
-The exporter **MUST** assert the pairing and raise on a mismatch. See §14, gap G1: the exact pairing for `binary:logistic` and `survival:cox` is established by probe before Phase 4 begins.
+The exporter **MUST** assert the pairing and raise on a mismatch. The pairing is measured, not assumed (`probes/output_transform.md`):
+
+| `objective` | `output_transform` | Winner residual | Runner-up |
+|---|---|---|---|
+| `reg:squarederror` | `identity` | `0.0` exactly | `relu`, `1.0` |
+| `binary:logistic` | `sigmoid` | `1.042e-07` | `log`, `3.268` |
+| `survival:cox` | `exp` | `5.896e-08` | `softplus`, `0.99999997` |
+
+Eleven candidate transforms were scored per objective across 43 fitted models; the winners are bit-exact on 107500/107500 rows. For Cox, `predict() == expf(margin)` on 45000/45000 — `exp` is the whole story and nothing further is applied.
 
 ### 5.1 Precision of the output transform — normative
 
-**Margins are float32 throughout. The output transform widens to float64 on both sides.**
+**Margins are float32 throughout, and the output transform is evaluated under float32 semantics.**
 
 ```
-Python       out = transform(np.float64(margin_f32))
-JavaScript   out = transform(margin_f32)        // already a JS number, i.e. float64
+Python       every intermediate wrapped in np.float32(...)
+JavaScript   every intermediate wrapped in Math.fround(...)
 ```
 
-A predictor **MUST NOT** perform the output transform in float32, and **MUST NOT** narrow the result back to float32.
+A predictor **MUST NOT** evaluate the transform in float64 and **MUST NOT** call a platform transcendental (§5.4).
 
-> **Why this is a requirement and not a note.** JavaScript has no float32 `exp` or `log`. `Math.exp` is float64, and there is no `Math.fround`-based route to a float32-accurate transcendental — `Math.fround(Math.exp(x))` is a float64 exp rounded once, which is not the same value as a genuine float32 exp. So a float32 output transform is **not reproducible in the JavaScript runtime at all**, and specifying one would make exactly-`0.0` cross-language parity unreachable at the output stage by construction.
+> **Why float32 arithmetic can be simulated exactly, which is what makes this safe.** Performing a float64 operation and then narrowing to float32 is **exact** for `+ − × ÷`: float64 carries more than twice float32's significand, so double-rounding cannot occur for these four operations. This is a property of the IEEE-754 formats, not an empirical observation, and it holds identically in both languages.
 >
-> Widening delivers bit-identical *inputs* to the transform: `np.float64(x)` on a float32 is exact, and a JS number already *is* float64.
+> It does **not** extend to `exp`. That is precisely why `exp` must be *built from* the four operations rather than called — see §5.4.
 >
-> Bit-identical inputs are **not** sufficient for a bit-identical result. IEEE-754 mandates correct rounding only for `+ − × ÷ √` and fused multiply-add. **`exp` is not required to be correctly rounded, and no two `libm` implementations agree.** Measured on this platform pair: V8's `exp` differs from Apple's `libm` on **4.2%** of sigmoid evaluations and **9.6%** of `exp` evaluations, by up to **2 ULP** (worst sigmoid case at margin `0.9417615532875061`: `0.7194553455999664` versus `0.7194553455999666`). Python's `np.exp` and `math.exp` agree with each other on 6009/6009, confirming the split is between runtimes, not within one.
->
-> This is why §5.4 exists. Widening is necessary but not sufficient, and the remaining gap is closed by not calling `libm` at all.
+> IEEE-754 mandates correct rounding only for `+ − × ÷ √` and fused multiply-add. **`exp` is not required to be correctly rounded, and no two `libm` implementations agree.** Measured: V8's `exp` differs from Apple's `libm` on **4.2%** of sigmoid evaluations and **9.6%** of `exp` evaluations, by up to **2 ULP** (worst sigmoid case at margin `0.9417615532875061`: `0.7194553455999664` versus `0.7194553455999666`). Python's `np.exp` and `math.exp` agree on 6009/6009, locating the split between runtimes rather than within one. This is not a precision-width question, and widening does not fix it.
 
-**Consequence, accepted deliberately.** If XGBoost computes its own output transform in float32 internally, this library's probability output will differ slightly from XGBoost's. That difference is bounded by the `1e-6` gate and is accepted: **cross-language reproducibility wins over matching XGBoost bit-for-bit at the output stage.** The margin comparison against XGBoost is unaffected and remains in the low `1e-7` range.
+**Why float32 and not float64.** XGBoost transforms in float32 **with clamps** (§5.2). A float64 transform is not off by a ULP in the tail — it is qualitatively wrong there: **relative error `1.0`** below the logistic clamp floor, and finite-versus-`inf` for Cox. Divergence from upstream that is itself silent is the thing this library exists to surface, so upstream is matched in the tail rather than diverged from quietly.
 
-### 5.2 The parity gate has two measurement points
+Cross-language parity remains exactly `0.0` under float32 semantics, because every operation on both sides is one this format controls. There is no `libm` anywhere in the path.
+
+### 5.2 XGBoost's clamps are reproduced
+
+Measured behavior that the transform **MUST** reproduce:
+
+| Objective | Clamp |
+|---|---|
+| `binary:logistic` | Floors at margin `f32(-88.7)`, returning exactly `3.006635794144578e-39` — **never** `0.0`. The sole float32 input producing those bits is `-88.69999694824219`, found by exhaustive scan of all 262145 float32 values in `[-90, -88]` |
+| `survival:cox` | **No clamp.** Returns `+inf` above margin ≈ `88.72` (734/2500 rows measured). Never negative, never exactly `0.0`, never NaN |
+| `reg:squarederror` | Identity; no clamp |
+
+Two consequences worth stating because they are easy to get backwards:
+
+- Sigmoid output of exactly `1` **is** reachable (288/2500 rows measured). Sigmoid output of exactly `0` is **not** reachable through XGBoost, because the clamp floor prevents it. A fixture demanding saturation at `0` is testing something XGBoost cannot produce.
+- Whether the logistic clamp is an input clamp on the margin or an output floor is **observationally identical** and is not resolved here; either implementation satisfies this specification. An upper clamp at `+88.7` is undetectable because both clamped and unclamped give exactly `1.0`.
+
+**Clamp constants are XGBoost internals and are version-sensitive in exactly the way `weight_drop` proved to be** (§2). They fall under the version ceiling and are re-probed whenever the tested version list widens.
+
+**Bit-exactness with XGBoost at the output is unreachable and is not a goal.** XGBoost's own `expf` is not correctly rounded — an mpmath-exact reference rounded to float32 scores 1600/2500 against it. Do not chase it.
+
+### 5.3 The parity gate has two measurement points
 
 Cross-language parity is checked at **both**, and both are exactly `0.0`, bit-identical:
 
@@ -124,7 +151,7 @@ Phase 8 checks both. A margin-only parity check passes while a transform mismatc
 
 Neither figure carries a tolerance. §5.4 is what makes the second one attainable.
 
-### 5.3 The transform is bundled, not the platform's
+### 5.4 The transform is bundled, not the platform's
 
 Both packages implement `sigmoid` and `exp` themselves. Neither calls `Math.exp`, `math.exp`, `np.exp`, or any other platform transcendental on the prediction path.
 
@@ -134,7 +161,7 @@ Both packages implement `sigmoid` and `exp` themselves. Neither calls `Math.exp`
 
 Accuracy cost is not a design input. A bundled implementation at ~1 ULP against a correctly-rounded reference, versus `libm`'s ~0.5 ULP, is a relative difference around `1e-16` — sixteen orders of magnitude below the `1e-6` output gate.
 
-### 5.4 Implementation constraints for the bundled transform
+### 5.5 Implementation constraints for the bundled transform
 
 Bit-identity across languages is a property that can be lost by accident. These are requirements, not guidance.
 
@@ -143,7 +170,7 @@ Bit-identity across languages is a property that can be lost by accident. These 
 - **No vectorization in the reference transform.** Scalar, explicit, boring.
 - **Argument-reduction constants are split hi/lo and written as literal float64 bit patterns in both languages**, never as decimal strings that each language's parser rounds independently. The test suite verifies that the two sides' constants parse to identical bits before anything downstream is trusted.
 
-### 5.5 Validating the bundled transform
+### 5.6 Validating the bundled transform
 
 **Each side is validated independently against a high-precision reference — `mpmath` at 50 digits — and never against the other side.**
 
@@ -155,17 +182,32 @@ Per objective, sampling at least `1e6` points across the full representable inpu
 - the subnormal transition
 - `+inf`, `-inf`, `NaN`
 - exact `0.0` and `-0.0`
-- margins large enough to saturate sigmoid at exactly `0` and exactly `1`
+- margins at and beyond **both clamp boundaries** (§5.2)
+- saturation at exactly `1`, which is reachable. Saturation at exactly `0` is **not** reachable through XGBoost — the logistic clamp floor prevents it, so a fixture demanding it tests nothing
 
 This is now the most dangerous code in the repository: novel numerical code is new silent-wrongness surface, introduced in the one place the project previously had none. The adversarial-fixture treatment applies to it in full, including the revert-and-confirm-red methodology of D019.
 
-### 5.6 Consequence for the comparison against XGBoost
+### 5.7 The accuracy gate against XGBoost is relative; the parity gate is exact
 
-XGBoost computes its own output transform in C++ `libm`. A bundled transform therefore diverges from XGBoost's probability output by roughly 1–2 ULP **by construction**.
+**These are two different gates and conflating them is how a tolerance leaks into the parity gate.** Cross-language parity (§5.3) is exact equality and no tolerance question touches it. This section is only about the Python-vs-XGBoost *accuracy* comparison.
 
-This is expected, irrelevant at the `1e-6` output gate, and **must not be read as a regression** by anyone reviewing a later report. The margin-level comparison against XGBoost is unaffected and stays in the low `1e-7` range.
+| Comparison | Instrument |
+|---|---|
+| Margin, Python vs XGBoost | **Absolute** ≤ `1e-6`. Currently `0.0` bit-exact at all 16 measured sweep configurations — treat any regression from that as a defect to diagnose, not headroom to spend |
+| Output, Python vs XGBoost | **Relative** ≤ `1e-6`, computed against XGBoost's value |
 
-### 5.7 The output transform is a different thing from the intercept transform
+> **Why the output gate is relative.** An absolute bound flags the wrong objective and misses the real defect. Cox output is a hazard ratio spanning `2.85e-04` to `7.56e+08`, so absolute error there is meaningless — measured `1.94` up to `6.96e+23`, plus rows at `+inf` — while its max *relative* error is `5.7e-08`. Meanwhile `binary:logistic` passes an absolute gate trivially while being **relatively 100% wrong** below the clamp floor if the transform is implemented in float64.
+
+Rules for the cases that otherwise fall out of the comparison silently:
+
+- **`+inf` and `-inf`** — must match as **bit patterns**. Never divide, and never let an infinity drop out of the comparison.
+- **NaN** — always a failure, on either side, with no exception. NaN compares unequal to everything including itself, so a naive harness silently *skips* exactly these rows.
+- **XGBoost's value exactly `0.0` or `-0.0`** — require exact bit-pattern equality rather than computing a ratio.
+- The harness reports **max relative error and the row that produced it**, never a mean. A mean hides one catastrophic row in a large corpus.
+
+Because the transform is bundled and XGBoost's is `libm`-based, a small divergence at the output is expected **by construction** and must not be read as a regression. Bit-exactness with XGBoost is unreachable (§5.2).
+
+### 5.8 The output transform is a different thing from the intercept transform
 
 These two are separate concerns and this specification keeps them separate:
 
@@ -191,7 +233,35 @@ A predictor **MUST NOT** apply `logit`, `ln`, `exp`, or any other function to th
 >
 > The transform is not merely delicate, it is *specifically* delicate. The textbook `log(p/(1-p))` is not equivalent: it is bit-wrong on 16 of 27 measured values and **breaches the `1e-6` margin gate** (`probes/base_score.md` §5). Independently reproduced during Phase 2 review at 100 trees: `7.63e-06` at `base_score=0.987654` and `1.91e-06` at `0.48`, against `0.0` for the correct form. Reproducing it requires the exact float32 expression, not generic float32 discipline. Implementing that once, in one language, is categorically safer than mirroring it in two.
 
-### 6.1 Signed zero is reachable and is not normalized
+### 6.1 Deriving the intercept at export — the exact rule
+
+Two things select the space. Both are read from the source model; neither is guessed.
+
+**Step 1 — `boost_from_average` decides whether a transform applies at all.** Read `learner.learner_model_param.boost_from_average`. When there are **zero trees** and it is `"1"`, XGBoost emits the **raw `base_score`** as the margin, with no link transform. Verified: logistic default gives margin `0.5` where the link would give `-0.0`; Cox default gives `0.5` where the link would give `-0.693147`. Every model with at least one tree applies the transform.
+
+This field is load-bearing and was previously absent from this specification. Flipping that one string moves the margin between `0.5` and `-0.0`.
+
+**Step 2 — clamp, then transform, per objective.**
+
+| Objective | Rule |
+|---|---|
+| `reg:squarederror` | `f32(base_score)`. No clamp |
+| `survival:cox` | `log(f32(base_score))`. No clamp — verified at `1e-38` and `1e38` |
+| `binary:logistic` | **Clamp `p` to `[f32(1e-6), f32(1 - 1e-6)]` first**, then `-log(f32(f32(1/p) - 1))` |
+
+> **Why the clamp, and why it is easy to miss.** XGBoost clamps `base_score` before deriving the logistic intercept **but stores the value unclamped.** Applying the recipe to the stored value is wrong by up to **13.8 in margin space**. Independently verified: at `base_score=1e-12` the unclamped recipe gives `-27.631021` where XGBoost's intercept is `-13.815510`; at `1e-7`, `-16.118095` versus `-13.815510`; at `0.9999999`, `15.942385` versus `13.745160`. Clamping first reproduces XGBoost exactly in every case. Additionally `base_score = 1 - 1e-10` stores as `[1E0]`, where the unclamped recipe raises `math domain error` outright.
+
+### 6.2 The export-time intercept check uses an independent oracle
+
+The exporter **MUST** validate the derived intercept against **XGBoost's own observed zero-tree margin** — fit the same configuration with zero boosting rounds, read `predict(output_margin=True)`, and require bit equality.
+
+It **MUST NOT** validate by re-deriving the intercept from `base_score` and comparing the two derivations.
+
+> **Why this replaces the original check.** The first version of this rule compared the stored `base_score` against a re-derivation of the export recipe. Both sides ran the same recipe, so **an error in the recipe could not make the check fire** — and the `base_score` clamp above is exactly such an error, which that check would have passed. A validation whose oracle shares the defect it is looking for is decorative.
+>
+> This generalizes and is a standing rule for this codebase: every check must have an oracle independent of the thing it checks. State what the oracle is and why it cannot share the defect. "It compares our value to our other value" is not an oracle.
+
+### 6.3 Signed zero is reachable and is not normalized
 
 `intercept` can legitimately be **negative zero**, and it arrives through an ordinary default: `binary:logistic` with `base_score = 0.5` gives `-log(f32(1/0.5 − 1)) = -log(1) = -0.0`, bit pattern `0x80000000`. Verified during Phase 2 review.
 
@@ -201,7 +271,11 @@ Consequently:
 
 A hazard for any future tooling: `JSON.stringify(-0)` in JavaScript emits `0`, silently destroying the sign. Python's `json.dumps(-0.0)` emits `-0.0` and is correct. This is one more reason export is Python-only.
 
-**Required fixture.** The corpus **MUST** include a case where the intercept *is* the entire output — a zero-tree model, or one whose leaves are all zero, at `base_score = 0.5` for `binary:logistic`. That is the only configuration in which `-0.0` survives all the way to the output rather than being absorbed by the first addition, so it is the only case that can detect a reader or a parity harness that normalizes signed zero.
+**Required fixture, and it must be built carefully or it tests nothing.** The corpus **MUST** include a case where the intercept *is* the entire output — a zero-tree model, or one whose leaves are all zero — at `base_score = 0.5` for `binary:logistic`. That is the only configuration in which `-0.0` survives to the output rather than being absorbed by the first addition.
+
+**`base_score = 0.5` MUST be passed explicitly.** On a zero-tree model left at the default, `boost_from_average` is `"1"` and XGBoost emits the raw `0.5` rather than the link-transformed `-0.0` (§6.1). A fixture built from the default is therefore in the *wrong space* and would test nothing at all — while looking exactly like a signed-zero fixture. Passing `base_score` explicitly flips `boost_from_average` and the transform is applied.
+
+This correction exists because the first version of this requirement did not say it, and the fixture it specified would have been built wrong.
 
 ---
 
@@ -400,9 +474,23 @@ The exporter raises on every condition below. Each is a wrong-number path, not a
 
 > Both paths must be checked because the field relocated between 3.3.0 and 3.4.0-dev (`probes/version_drift.md` §3). Only one in-artifact dart signal exists, confirmed by exhaustive key census (`probes/boosters.md` §2) — so the two-signal rule cannot be satisfied for *acceptance*, but works perfectly for *refusal*. A model trained as `dart` with `rate_drop=0`/`skip_drop=0` is byte-identical to `gbtree` and exports fine; that is a feature of D016, not a gap.
 
-**Output arity (D017).** Require `num_target == "1"` **and** `size_leaf_vector == "1"` **and** `num_class == "0"`, in addition to the objective allow-list.
+**Output arity (D017).** In addition to the objective allow-list, require:
 
+| Field | Location | Required value |
+|---|---|---|
+| `num_target` | `learner.learner_model_param` | `"1"` |
+| `num_class` | `learner.learner_model_param` | `"0"` **or** `"1"` |
+| `size_leaf_vector` | **each tree's** `tree_param` | `"1"` for every tree; a model with **zero trees vacuously passes** |
+
+**All four gate fields — including `objective.name` — are JSON strings and MUST be compared as strings.** An integer comparison silently never fires: `num_class == 0` is `False` against `"0"`. Verified for all four.
+
+> **`num_class` accepts `"1"`, and requiring `"0"` was a defect.** Independently verified across all three in-scope objectives: `binary:logistic` with `num_class=1` produces the *same model* — trees byte-identical, margins bit-identical 400/400, `predict()` shape `(400,)` — and requiring `"0"` **rejects all three**. A false rejection is worse than over-strictness because it reads as correct strictness and is not. Relaxing to `{"0", "1"}` admitted nothing extra across a 23-shape table with zero false acceptances; `multi:softprob` with `num_class=1` is still caught by the objective allow-list.
+>
+> **`size_leaf_vector` exists only per-tree**, never in `learner_model_param` (census over 20 artifacts: occurrences equal the tree count). A scalar comparison against a model-level field has no referent, and on a zero-tree model there is nothing to read at all — hence the explicit vacuous-pass rule. Without it the gate rejects every zero-round model, which §16 and §6.3 both require to be exportable.
+>
 > An objective-name allow-list alone has a hole: `reg:squarederror` with `num_target=2` is an in-scope objective producing `tree_info=[0,1,0,1,...]`, a two-element `base_score`, and `(N,2)` margins (`probes/multiclass_extensibility.md` §7). A scalar predictor accepts it and returns confident wrong numbers.
+
+Zero-boosting-round models serialize `"trees": []` — **present and empty, never absent**, verified on all three objectives. A reader handles the empty array; it does not need to handle a missing key.
 
 **Categorical splits.** Raise if **any** of: `split_type` contains `1`; `categories_nodes` is non-empty; `learner.feature_types` contains `'c'`. All three were measured present together (`probes/tree_structure.md` §9); all three are checked because this is a refusal test, where redundancy is free.
 
@@ -416,7 +504,7 @@ The exporter raises on every condition below. Each is a wrong-number path, not a
 
 **Neutralization self-check (§8.3).** Raise if any neutralized tree's walk disagrees with `predict(output_margin=True)`, and raise if the reachability marking disagrees with the `split_indices == 2147483647` marker.
 
-**Intercept agreement (D015).** Raise if the derived `intercept` disagrees with the transform of `provenance.base_score`. Python-only; costs nothing at runtime.
+**Intercept agreement, against an independent oracle (§6.2).** Raise if the derived `intercept` disagrees bit-for-bit with **XGBoost's own zero-tree margin** for the same configuration. Python-only; costs nothing at runtime. Do **not** implement this as a comparison against a re-derivation of the export recipe — that check cannot fire on a recipe error, which is the class of error it exists to catch.
 
 ---
 
@@ -461,17 +549,25 @@ The reader takes a parsed object. There is no `fromFile` in JavaScript (D006): f
 
 ---
 
-## 14. Evidence gaps
+## 14. Evidence gaps, and what closing them changed
 
-All design decisions in this specification are settled. What remains is measurement.
+**G1 and G3 are closed.** Both were probed (`probes/output_transform.md`, `probes/arity_gate.md`) and both falsified rules this specification had asserted. The corrections are folded into the sections above; they are listed here because a reader who saw the earlier version needs to know what moved and why.
 
-**G1 — the objective→transform pairing, and XGBoost's internal transform precision.** *Blocking; probed before Phase 4 begins.* No probe has established what `predict()` returns relative to `output_margin=True` for `binary:logistic` or `survival:cox`. Sigmoid and `exp` are the conventional answers, and `probes/base_score.md` §4 confirms `base_score` is in *probability* space for logistic, which is consistent with sigmoid — but consistent-with is not measured, and this specification does not assert unmeasured numerical facts. §5's enumerated set is structurally correct while the pairing itself is unverified.
+| Was | Is | Evidence |
+|---|---|---|
+| Output transform widens to float64 on both sides | Evaluated under **float32** semantics, reproducing XGBoost's clamps (§5.1, §5.2) | XGBoost transforms in float32: 400/400 bit-exact versus 236/400 for float64, and on all 164 rows where the hypotheses disagree, XGBoost matches float32 164/164 and float64 0/164 |
+| Output gate is absolute ≤ `1e-6` | **Relative** ≤ `1e-6`, with explicit `inf`/NaN/signed-zero rules (§5.7) | Cox absolute error reaches `6.96e+23` with `+inf` rows while its relative error is `5.7e-08`; logistic passes absolutely while being relatively 100% wrong below the clamp |
+| Intercept is `-log(f32(f32(1/p) − 1))` of the stored `base_score` | **Clamp `p` first** to `[f32(1e-6), f32(1 − 1e-6)]` (§6.1) | Unclamped is wrong by up to `13.8` in margin space, and raises `math domain error` at `base_score = 1 − 1e-10` |
+| Export asserts intercept against a re-derivation | Asserts against **XGBoost's observed zero-tree margin** (§6.2) | The original check applies the same recipe to both sides, so the clamp defect above could not make it fire |
+| `num_class == "0"` | `num_class ∈ {"0", "1"}`, compared as a **string** (§11) | `"1"` is producible on a genuine single-output model, verified across all three objectives; the old rule rejected all three |
+| `size_leaf_vector == "1"` model-level | **Per-tree**, with zero trees a vacuous pass (§11) | The field exists only per-tree; a zero-tree model has zero occurrences and the old rule had no referent |
+| Signed-zero fixture at `base_score = 0.5` | Same, but `base_score` **passed explicitly** (§6.3) | At the default, `boost_from_average == "1"` makes a zero-tree margin the raw `0.5`, not the link-transformed `-0.0` — the fixture would have been built in the wrong space |
 
-The probe also establishes whether XGBoost computes its output transform in float32 or float64 internally. That does **not** change §5.1 — the float64-both-sides rule is a reproducibility requirement, not a fidelity one — but it predicts the size of the accepted Python-vs-XGBoost divergence at the probability level, which must stay inside `1e-6` while the margin comparison stays in the low `1e-7` range.
+Two of these were defects in reasoning rather than gaps in coverage — the self-blind assertion and the float64 transform — and both are recorded rather than quietly overwritten, because the reasoning failures generalize.
 
-**G2 — `learner.gradient_booster.model.cats` purpose unknown.** *Not blocking.* Empty in every model probed, including two with genuine categorical splits (`probes/tree_structure.md` §3.1). Categorical models are refused in v1, so this cannot affect a v1 artifact. It needs probing before any categorical support.
+**G2 — `learner.gradient_booster.model.cats` purpose unknown.** *Still open, not blocking.* Empty in every model probed, including two with genuine categorical splits (`probes/tree_structure.md` §3.1). Categorical models are refused in v1, so this cannot affect a v1 artifact. It needs probing before any categorical support.
 
-**G3 — `num_class = 0` versus `1` for binary classification.** *Blocking; probed with G1.* Only `0` was observed (`probes/tree_structure.md` §3.1), and §11 requires `num_class == "0"` exactly. If `"1"` is producible for a genuine single-output binary model, that check falsely rejects a valid model — the one failure direction worse than being too strict, because it looks like correct strictness and is not.
+**G4 — the logistic clamp's exact form.** *Open, not blocking.* Whether the clamp is applied to the margin on input or as a floor on output is observationally identical, and an upper clamp at `+88.7` is undetectable because clamped and unclamped both give exactly `1.0`. Either implementation satisfies §5.2. The measured floor constant is pinned; its mechanism is not.
 
 ---
 
@@ -482,6 +578,7 @@ Each omission is a decision, and none of these fields is reserved for later (D00
 | Omitted | Why |
 |---|---|
 | `base_score` as an operative field | D015. Retained in `provenance`, read by nothing |
+| `boost_from_average` | An **export-time input**, not artifact content. It selects which intercept space applies (§6.1) and its effect is already baked into `intercept`. Carrying it would invite a predictor to branch on it |
 | `base_weights` | Unshrunk node weight, not the leaf output. A walk using it is off by `5.10` in margin (`probes/tree_structure.md` §4) |
 | `loss_changes`, `sum_hessian`, `parents` | Never read by any walk that reproduces `predict()` at `0.0` (`probes/tree_structure.md` §12). `parents` is additionally *stale* after pruning, and `loss_changes` drifts across versions |
 | `id` | Positional, renumbered by slicing; not a stable identity |
