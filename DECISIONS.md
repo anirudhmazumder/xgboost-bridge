@@ -491,3 +491,30 @@ Require `num_target == "1"`, `num_class ∈ {"0", "1"}`, and `size_leaf_vector =
 **Why string comparison:** `num_class == 0` is `False` against `"0"`. An integer comparison silently never fires, which would disable the gate rather than trip it.
 
 Zero-round models serialize `"trees": []` — present and empty, never absent, verified on all three objectives.
+
+---
+
+## D038 — Export raises on an early-stopped model whose tree count is ambiguous
+
+*2026-08-02* — **resolves D023**
+
+The exporter raises when `iteration_indptr[best_iteration + 1] != len(trees)`. The error directs the caller to slice the model explicitly — `bst[0:best_iteration + 1]` — and re-export.
+
+**Why raising is the only correct answer: the tree count is not a property of the model.** Measured on **one file on disk, loaded two ways**:
+
+| Loaded as | vs walk over all trees | vs walk over `best_iteration+1` iterations |
+|---|---|---|
+| bare `Booster` | **2500/2500** | 0/2500 |
+| sklearn estimator | 0/2500 | **2500/2500** |
+
+Max absolute divergence between the two readings: `1.55`. **No field in the artifact distinguishes them.** An exporter that picks either reading is silently wrong for half its callers, and the wrongness is a plausible number on every row. `iteration_range=(0,0)` compounds it — explicitly passed, it means "all trees" through `Booster.predict` and "`best_iteration+1` iterations" through the estimator. Same argument, same model, two answers.
+
+**Why the predicate is not simply "`best_iteration` is present."** With `early_stopping_rounds` set but never fired, `best_iteration=4` and `num_boosted_rounds=5`, and both readings agree 2500/2500. Refusing on presence alone would reject models that are unambiguous. The predicate keys on whether the trees actually extend past the best iteration.
+
+**Truncation, if ever implemented, must be in iterations rather than trees.** `iteration_indptr` is authoritative. At `num_parallel_tree=3` with `best_iteration=7`, truncating to `trees[0:24]` is bit-exact 2500/2500 while truncating to `trees[0:8]` scores 0/2500 at max error `2.19`. A tree-based truncation is correct at `num_parallel_tree=1` and wrong above it — the classic shape of a defect that passes every test written against the default.
+
+**`best_iteration` lives only at `learner.attributes.best_iteration`**, as the JSON string `"7"`, and is absent from every model param. Reading it at export needs no D020 whitelist entry; emitting it would. It is not emitted — the artifact has no ambiguous tree count to record, because ambiguous models are refused.
+
+**Not version-dependent.** Re-measured on XGBoost 3.4.0: every number byte-identical, 50 key paths identical, no relocation. The behavior is API-path-dependent, which is worse — a version ceiling cannot defend against it, only refusal can.
+
+**Unmeasured and recorded as such:** the `save_best=True` callback. If it trims the model, the predicate is satisfied and export proceeds — which is safe, because a satisfied predicate means both readings coincide.
