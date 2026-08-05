@@ -20,6 +20,7 @@ from .errors import (
     InterceptMismatchError,
     MalformedTreeError,
     MissingFeatureNamesError,
+    NonFiniteFeatureError,
     NonFiniteInterceptError,
     UnrecognizedFieldError,
     UnsupportedBoosterError,
@@ -30,10 +31,14 @@ from .errors import (
 )
 from .export import FORMAT_VERSION, export_model, to_json
 from .objectives import OUTPUT_TRANSFORMS, SUPPORTED_OBJECTIVES
+from .predict import Predictor
+from .transform import OUTPUT_FUNCTIONS
 
 __all__ = [
     "FORMAT_VERSION",
+    "OUTPUT_FUNCTIONS",
     "OUTPUT_TRANSFORMS",
+    "Predictor",
     "SUPPORTED_OBJECTIVES",
     # Errors, every one a subclass of XGBoostBridgeError so a caller can catch
     # the base class or branch on the specific failure.
@@ -43,6 +48,7 @@ __all__ = [
     "InterceptMismatchError",
     "MalformedTreeError",
     "MissingFeatureNamesError",
+    "NonFiniteFeatureError",
     "NonFiniteInterceptError",
     "UnrecognizedFieldError",
     "UnsupportedBoosterError",

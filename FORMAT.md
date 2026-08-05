@@ -679,7 +679,9 @@ Predicting `{"feature_a": 0.25, "feature_b": 9.0}`:
 1. `acc = f32(0.40546515583992004)` → `0.40546516`
 2. Tree 0, node 0: `f32(0.25) < f32(0.5)` is true → left → node 1, a leaf. `acc = f32(0.40546516 + (-0.25))` → `0.15546516`
 3. Tree 1, node 0 is a leaf. `acc = f32(0.15546516 + 0.125)` → `0.28046516`
-4. `margin = 0.28046516`; `sigmoid(margin) = 0.5696602593994496`
+4. `margin = 0.28046516`; `sigmoid(margin) = 0.5696602463722229`
+
+> The sigmoid decimal is the **float32** result, as §5.1 requires. A float64 sigmoid of the same margin gives `0.5696602593994496`, which narrows to the same float32 bit pattern `0x3f11d541` — so the two are not in conflict, but an implementer comparing decimals against the wrong one will conclude they have a bug. Earlier revisions of this example printed the float64 value.
 
 Note that `feature_b` is never read by any split, yet it **must** still be present in the input: the key set must equal `feature_names` exactly (§7). Omitting it raises rather than being treated as missing — which is the entire point of D005, since a missing value is legitimate model structure and would silently produce a different, plausible number.
 

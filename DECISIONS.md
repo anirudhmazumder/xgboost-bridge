@@ -660,3 +660,33 @@ Independently re-measured during review: `exp` 1 ULP over 60k points; `sigmoid` 
 **One structural check exists because no ULP measurement could replace it.** A drift to float64 intermediates would score *better* against `mpmath`, so accuracy cannot detect it. An AST scan therefore requires at most one arithmetic operation per statement and every one wrapped in `np.float32(...)`, and a token scan rejects `**`, `math.pow`, and every platform exponential by name.
 
 Constants are pinned twice: once as integer bit patterns, so the JavaScript port can assert the same integers, and once against `mpmath` for meaning (`_INV_LN2 == round(1/ln2)`, `_Cn == round(1/n!)`). The second check caught a transcription typo in the floor constant that the first would have happily pinned.
+
+---
+
+## D047 — The reader narrows structurally, and the divergence from XGBoost is pinned as a set
+
+*2026-08-05*
+
+`Predictor.from_json` loads `node_values` into read-only `dtype=np.float32` arrays at parse time, per FORMAT.md §9.2, and validates the artifact against §13 on load.
+
+**Measured against the full corpus, ordinary and adversarial, 23 fixtures:**
+
+| | Result |
+|---|---|
+| Margin, bit-exact vs XGBoost | **289/289** |
+| Output, bit-exact vs XGBoost | 283/289, max **relative** error `9.56e-08` |
+| Cox `+inf` output rows | 2/2 bit-exact |
+| Logistic clamp-floor rows | 21/21 bit-exact at `0x0020bd47`, never `0.0` |
+| Refusal fixture | 10/10 raise |
+
+The six output divergences are `libm` differences inside the bundled `exp`, expected by construction (§5.2: bit-exactness with XGBoost at the output is unreachable, because its own `expf` is not correctly rounded) and far inside the `1e-6` relative gate of D033.
+
+**They are pinned as an exact set of `(fixture, row)` pairs plus the count, not absorbed into a tolerance.** Movement in *either* direction fails — including an improvement. That keeps the gate a tripwire rather than a band a future defect could hide inside, which is the distinction D033 rests on. All six fall on the two objectives that use the bundled `exp`; the `identity` fixtures diverge on nothing, which is the right shape for the finding.
+
+**The structural-narrowing site cannot be pinned by a prediction, and that is disclosed rather than papered over.** Reverting `node_values` to un-narrowed Python floats turns **23 tests red and zero prediction tests red**. The reason is arithmetic, not thin coverage: `walk_margin` narrows both operands, and `np.float32(np.float64(x)) == np.float32(x)`, so narrowing at parse is idempotent with narrowing at comparison. What differs is every *other* consumer of the array — a re-serializer, an inspection utility, an arithmetic transform — which is precisely §9.2's argument for making it structural. The pin is therefore structural too: dtype, read-only-ness, and a hand-edited artifact read back through the public view where the un-narrowed float64 is a visibly different number. Same reasoning applies to the intercept.
+
+**D028's no-branching-on-`objective` rule needs both of its checks.** A no-op `if objective == ...` inserted into the prediction path turns only the source-level check red; an obfuscated behavioural branch (`getattr(self, "_" + "objectiv" + "e")`) turns nine behavioural tests red while the source check stays green. Neither is redundant, which under D019 is the test for whether both should exist.
+
+**One check beyond §13's enumerated list: a cycle in the reachable subgraph.** Every child index can be in range and still form a cycle, and `walk_margin` then never terminates — measured, a subprocess was killed at a 5-second timeout having printed nothing. A non-terminating predictor is a worse outcome than a raise. Confined to the reachable subgraph so §13's rule that unreachable nodes must *not* raise is untouched.
+
+**Corrected in FORMAT.md §16:** the worked example printed `sigmoid(margin) = 0.5696602593994496`, a float64 result, where §5.1 requires float32 evaluation and the correct decimal is `0.5696602463722229`. Both narrow to bit pattern `0x3f11d541`, so nothing was contradictory — but an implementer comparing decimals against the wrong one concludes they have a bug, and the JavaScript port is written from that example next.
