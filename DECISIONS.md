@@ -690,3 +690,34 @@ The six output divergences are `libm` differences inside the bundled `exp`, expe
 **One check beyond §13's enumerated list: a cycle in the reachable subgraph.** Every child index can be in range and still form a cycle, and `walk_margin` then never terminates — measured, a subprocess was killed at a 5-second timeout having printed nothing. A non-terminating predictor is a worse outcome than a raise. Confined to the reachable subgraph so §13's rule that unreachable nodes must *not* raise is untouched.
 
 **Corrected in FORMAT.md §16:** the worked example printed `sigmoid(margin) = 0.5696602593994496`, a float64 result, where §5.1 requires float32 evaluation and the correct decimal is `0.5696602463722229`. Both narrow to bit pattern `0x3f11d541`, so nothing was contradictory — but an implementer comparing decimals against the wrong one concludes they have a bug, and the JavaScript port is written from that example next.
+
+---
+
+## D048 — The JavaScript predictor, and what the absorption mirror reveals
+
+*2026-08-05*
+
+`packages/js/src/{transform,artifact,predict}.ts`. Zero runtime dependencies, `fromJSON` only, `node_values` loaded into a `Float32Array` at parse time.
+
+| Check | Result |
+|---|---|
+| Node suite | **92 pass** / 0 fail / 0 skipped / 0 todo, on Node 20.19.0, 24.7.0 and 24.18.0 |
+| Corpus margin, bit-exact vs XGBoost | **289/289** across all 23 fixtures |
+| Corpus output, bit-exact vs XGBoost | 283/289, max relative `9.555893664308718e-08` |
+| `expF32` / `sigmoidF32` max ULP vs mpmath | **1** / **2** |
+| Argument-reduction constants | all **16** bit-identical to Python's pinned integers, both encodings |
+| Runtime dependencies | **0** |
+
+**The transform was validated against an mpmath reference table generated in Python, not against the Python implementation.** That distinction is the whole point: agreeing with `mpmath` is evidence of correctness, whereas agreeing with the other language proves only that the same code was written twice. The table generator deliberately duplicates the exact-rounding oracle rather than importing it from the Python test suite, so the JavaScript oracle does not depend on Python test internals.
+
+**The 6 output divergences are the same 6 `(fixture, row)` pairs, with the same max relative error, as the Python side recorded in D047.** Both sides also pin them as an exact set rather than a tolerance. That is the strongest available pre-harness signal that cross-language parity is exactly `0.0`; Phase 8 confirms it formally.
+
+**The absorption pattern is mirrored between the languages, and this is worth understanding.** In JavaScript, parse-time narrowing absorbs three of the five comparison-site casts — reverting the threshold cast, the leaf cast, or the intercept cast *alone* turns zero tests red. In Python it went the other way: NEP 50 weak-scalar promotion made the *parse-time* site the absorbed one (D047). So neither language can pin all five sites, they cannot pin the same ones, and which site looks redundant is a property of the host language's promotion rules rather than of the algorithm. Both structural sites are pinned in isolation on the JavaScript side (5 and 2 tests). The absorbed casts stay, per D045's reasoning, and the asymmetry is recorded so nobody "simplifies" one language to match the other.
+
+**One measurement settles why FORMAT.md §5.5 demands constants as bit patterns.** Flipping `LN2_LO` by a single bit pattern left **every ULP test green** and turned only the bit-pattern comparison red. Accuracy cannot detect a mis-transcribed constant; only the integer comparison can.
+
+**Two error codes were added to the `ErrorCode` union** — `MALFORMED_ARTIFACT` and `NON_FINITE_FEATURE`. The implementing agent could not edit that file and correctly refused to reuse a wrong code, because a caller switching on `code` would then handle a malformed artifact as "unrecognized field". It used a cast and flagged the debt; the union now carries both and the casts are gone.
+
+**The `npm test` script was not portable across the engine range it declares.** `node --test test/` (bare directory) fails on Node ≥ 22; `node --test "test/*.test.js"` (quoted glob) fails on Node 20, which cannot expand a glob itself. `engines.node` says `>=20`, so both spellings were broken somewhere in the supported range. The fix is an **unquoted** glob: npm runs scripts through a shell, so the shell expands it and Node only ever receives explicit paths. Verified on 20.19.0, 24.7.0 and 24.18.0. This surfaced only because the suite was run on more than one Node.
+
+**Two §13 refusals are not expressible in JavaScript**, recorded rather than papered over: `format_version: 1.0` is indistinguishable from `1` after `JSON.parse`, and `-0` passes `Number.isInteger` in an index array (with no numeric consequence, since it is `=== 0` as an index). The Python reader rejects the first; the JavaScript reader cannot. Every other spelling — `"1"`, `true`, `null`, `1.5`, `0`, `2` — is rejected on both sides.

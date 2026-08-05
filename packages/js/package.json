@@ -24,8 +24,8 @@
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test test/",
-    "test:nobuild": "node --test test/"
+    "test": "npm run build && node --test test/*.test.js",
+    "test:nobuild": "node --test test/*.test.js"
   },
   "dependencies": {},
   "devDependencies": {
