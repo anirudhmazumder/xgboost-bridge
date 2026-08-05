@@ -721,3 +721,34 @@ The six output divergences are `libm` differences inside the bundled `exp`, expe
 **The `npm test` script was not portable across the engine range it declares.** `node --test test/` (bare directory) fails on Node ≥ 22; `node --test "test/*.test.js"` (quoted glob) fails on Node 20, which cannot expand a glob itself. `engines.node` says `>=20`, so both spellings were broken somewhere in the supported range. The fix is an **unquoted** glob: npm runs scripts through a shell, so the shell expands it and Node only ever receives explicit paths. Verified on 20.19.0, 24.7.0 and 24.18.0. This surfaced only because the suite was run on more than one Node.
 
 **Two §13 refusals are not expressible in JavaScript**, recorded rather than papered over: `format_version: 1.0` is indistinguishable from `1` after `JSON.parse`, and `-0` passes `Number.isInteger` in an index array (with no numeric consequence, since it is `=== 0` as an index). The Python reader rejects the first; the JavaScript reader cannot. Every other spelling — `"1"`, `true`, `null`, `1.5`, `0`, `2` — is rejected on both sides.
+
+---
+
+## D049 — Cross-language parity is exactly 0.0, at both measurement points
+
+*2026-08-05* — **satisfies the headline gate**
+
+```
+rows compared                 299   (289 value + 10 refused)
+margin-point mismatches         0
+output-point mismatches         0
+refusal disagreements           0
+input-bit disagreements         0
+PARITY: 0.0 at both measurement points, on bit patterns.
+```
+
+All 23 fixtures, ordinary and adversarial. Verified on Node 20.19.0, 24.7.0 and 24.18.0; two consecutive runs byte-identical.
+
+**What this gate does not establish.** Cross-language agreement is not evidence of correctness — two identical implementations agreeing proves only that the code was written twice, and both sides being equally wrong is invisible here. Correctness lives in separate gates: against XGBoost's own recorded output (289/289 bit-exact at the margin) and against `mpmath` per side (D046, D048). The harness answers exactly one question, and `test_the_harness_carries_no_tolerance_of_any_kind` scans both its files for `1e-6`, `isclose`, `approx`, `atol`, `rtol` so the accuracy bound cannot leak in even as a fallback.
+
+**Transport is measured, not assumed.** Values cross the boundary as uint32 hex bit patterns. Eleven probe values also cross as plain JSON numbers *in the same round trip*, and that control **loses four of them**: `-0.0` arrives as `0`, and `+inf`, `-inf`, `NaN` all arrive as `null`. So the encoding choice is demonstrated rather than argued. A transport that quietly normalized a value would let the harness report perfect parity while hiding a real difference.
+
+**Signed zero is why the margin point cannot be dropped.** The signed-zero fixture's margin is `0x80000000` on both sides, but its *output* is `0x3f000000` — sigmoid maps both signed zeros to one half, so the sign is observable at the margin and nowhere after it. Injecting `0x80000000 → 0x00000000` yields margin-point mismatches and **zero** output-point mismatches, which is the asymmetry a single-point harness would miss entirely.
+
+**Nine of the 24 tests exist to prove the harness can fail**, because a parity harness that has never been seen to fail is not evidence of anything: one ULP at each point separately, negative-zero normalization, a side that stops refusing, a side that refuses with a different error, an injected `objective` branch, a side fed different inputs, a malformed bit-pattern token, and a silently dropped fixture. Each asserts the point name, fixture and row, and that the *other* point stays clean.
+
+**A real defect the injection work found in the harness itself.** The first injection helper emitted `0x-40f572f5`, because JavaScript's `& 0xffffffff` yields a signed int32, and the comparison string-compared it happily. **Two malformed tokens that agreed would have been credited as parity.** Tokens are now validated against the uint32 pattern and against value/refusal exclusivity before any comparison, and five malformed spellings are pinned. This is the independent-oracle principle applied to the comparison layer: a check that cannot distinguish "equal" from "both unparseable" is not a check.
+
+**Refusal kind is part of the gate**, not merely refusal-versus-value: both sides name `NonFiniteFeatureError`, and a one-sided rename fails. Stricter than the brief required, and kept.
+
+**Operational consequence, worth knowing.** `uv run pytest` now requires `node` and a current `packages/js/dist/`, and the harness *refuses* a bundle older than `packages/js/src/` rather than measuring stale code. That is intended — a parity number measured against a stale bundle describes code that is not the source — but it introduces an ordering relationship between the two suites that did not previously exist.
