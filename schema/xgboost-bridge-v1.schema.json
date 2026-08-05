@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://xgboost-bridge.dev/schema/xgboost-bridge-v1.schema.json",
+  "title": "xgboost-bridge artifact, format_version 1",
+  "description": "Normative JSON Schema for the artifact defined in FORMAT.md. A reader raises on any unrecognized key at any level (FORMAT.md section 3, section 13), so additionalProperties is false at every level of this document rather than only at the top.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format_version",
+    "objective",
+    "output_transform",
+    "intercept",
+    "feature_names",
+    "trees",
+    "provenance"
+  ],
+  "properties": {
+    "format_version": {
+      "const": 1,
+      "description": "The version of this specification, not of the exporter or of XGBoost (FORMAT.md section 2). A reader raises on any value other than the integer 1."
+    },
+    "objective": {
+      "type": "string",
+      "enum": ["reg:squarederror", "binary:logistic", "survival:cox"],
+      "description": "Non-operative metadata with an export-time validation role only: its sole job is the export-time cross-check against output_transform (FORMAT.md section 4, D028). No predictor, in either language, branches on this field on any prediction path -- output_transform alone determines runtime behavior."
+    },
+    "output_transform": {
+      "type": "string",
+      "enum": ["identity", "sigmoid", "exp"]
+    },
+    "intercept": {
+      "type": "number",
+      "description": "The single operative numeric value a predictor reads: the margin-space intercept, already transformed, narrowed to float32 on read, and used as the accumulator's initial value before any tree is walked (FORMAT.md section 6). A predictor never applies logit, ln, exp, or any other function to this field. provenance.base_score is read by nothing -- it is retained purely for inspection (D015)."
+    },
+    "feature_names": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "trees": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/tree" }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base_score", "exporter_version", "xgboost_version"],
+      "properties": {
+        "base_score": {
+          "type": "string",
+          "description": "The raw value XGBoost stored for learner.learner_model_param.base_score, copied through with zero interpretation -- a JSON string containing a bracketed array token such as \"[6E-1]\", never a parsed or float32-snapped number (FORMAT.md section 16). Nothing downstream reads this field; the operative intercept is the top-level intercept field."
+        },
+        "exporter_version": { "type": "string" },
+        "xgboost_version": { "type": "string" }
+      }
+    }
+  },
+  "$defs": {
+    "tree": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "default_left",
+        "left_children",
+        "node_values",
+        "right_children",
+        "split_indices"
+      ],
+      "properties": {
+        "default_left": {
+          "type": "array",
+          "items": { "type": "integer", "enum": [0, 1] },
+          "description": "1 routes a missing value to left_children[i]; 0 routes it to right_children[i]. Meaningless and never read at a leaf (FORMAT.md section 8)."
+        },
+        "left_children": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "node_values": {
+          "type": "array",
+          "items": { "type": "number" },
+          "description": "One array carrying both roles XGBoost's split_conditions carries: the float32 split threshold at an internal node, the float32 leaf output at a leaf. Which role applies is never ambiguous given left_children[i] == -1 (FORMAT.md section 8.1)."
+        },
+        "right_children": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "split_indices": {
+          "type": "array",
+          "items": { "type": "integer" }
+        }
+      }
+    }
+  }
+}

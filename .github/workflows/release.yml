@@ -1,0 +1,115 @@
+name: Release
+
+# CONFIGURED, NEVER EXECUTED. This file exists so the release mechanics are
+# reviewable before either package is ever published -- not because
+# publishing is imminent. No step below has been run. See COMPAT.md ("What
+# this document does not yet cover") and DECISIONS.md D012 for what is and
+# is not decided about a 1.0 announcement.
+#
+# Three independent things must all be true before this workflow could
+# publish anything, and only the first is expressed in GitHub Actions syntax
+# below; the other two are facts about the world as of this writing, recorded
+# here so a future reader does not have to rediscover them:
+#
+#   1. Trigger is `workflow_dispatch` only -- no `push`, no tag trigger, no
+#      `release` event anywhere in this file. Nothing in ordinary repository
+#      activity (a commit, a merge, a tag, a GitHub Release) can start this
+#      workflow; it requires a human to open the Actions tab and click
+#      "Run workflow" deliberately.
+#   2. Both publish jobs are gated on the `release` GitHub Environment
+#      (`environment: release` below). No such environment has been created
+#      in this repository's settings as of this writing. Creating one, and
+#      attaching a required-reviewer protection rule to it, is a
+#      repository-settings change -- this file cannot make that change and
+#      does not make it. Referencing an environment name that does not exist
+#      is not by itself a guarantee that GitHub will block the run; the
+#      protection comes from the reviewer rule that has not been configured,
+#      and that is a deliberate, separate, human action.
+#   3. Neither publish step has working credentials yet, because neither
+#      package has ever been published under either name: there is no PyPI
+#      Trusted Publisher entry naming this repository and workflow for
+#      `xgboost-bridge`, and there is no `NPM_TOKEN` secret in this
+#      repository for `xgboost-predictor`. Even a manually dispatched run of
+#      this workflow would fail authentication on both publish steps today.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: >-
+          Type "publish" to confirm intent. Documentary only -- no step below
+          reads this input's value; it exists so the manual dispatch form
+          itself states what is about to happen.
+        required: true
+        type: string
+
+jobs:
+  publish-python:
+    name: Publish xgboost-bridge to PyPI
+    runs-on: ubuntu-latest
+    # No environment named "release" exists in this repository yet -- see the
+    # file header. Until it is created with a required-reviewer rule, this
+    # name is a label, not a lock.
+    environment: release
+    permissions:
+      # Required for PyPI trusted publishing (OIDC). No PyPI API token is, or
+      # should ever be, stored in this repository.
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install uv and Python 3.12
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist and wheel
+        run: uv build packages/python --out-dir dist
+
+      - name: Publish to PyPI (trusted publishing, OIDC)
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist
+
+  publish-javascript:
+    name: Publish xgboost-predictor to npm
+    runs-on: ubuntu-latest
+    # Same unconfigured environment as publish-python; see the file header.
+    environment: release
+    defaults:
+      run:
+        working-directory: packages/js
+    permissions:
+      # Required alongside NODE_AUTH_TOKEN for `npm publish --provenance`.
+      id-token: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm install
+
+      # Same three checks the CI workflow runs, repeated here rather than
+      # trusted from a prior job: a publish workflow that skips its own
+      # verification because "CI already passed" is trusting a different
+      # commit's result for this one.
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Build (bundle to dist/)
+        run: npm run build
+
+      - name: Run JavaScript test suite
+        run: npm run test:nobuild
+
+      - name: Publish to npm (with provenance)
+        run: npm publish --access public --provenance
+        env:
+          # No such secret exists in this repository yet; see the file header.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

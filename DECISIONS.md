@@ -752,3 +752,25 @@ All 23 fixtures, ordinary and adversarial. Verified on Node 20.19.0, 24.7.0 and 
 **Refusal kind is part of the gate**, not merely refusal-versus-value: both sides name `NonFiniteFeatureError`, and a one-sided rename fails. Stricter than the brief required, and kept.
 
 **Operational consequence, worth knowing.** `uv run pytest` now requires `node` and a current `packages/js/dist/`, and the harness *refuses* a bundle older than `packages/js/src/` rather than measuring stale code. That is intended — a parity number measured against a stale bundle describes code that is not the source — but it introduces an ordering relationship between the two suites that did not previously exist.
+
+---
+
+## D050 — Schema, docs, release configuration, and the licence that was missing
+
+*2026-08-05*
+
+**JSON Schema** at `schema/xgboost-bridge-v1.schema.json`, draft 2020-12, `additionalProperties: false` at every level because the format raises on unrecognized keys and the schema must agree. All **23** fixture artifacts validate. Six mutations are pinned as rejections — an eighth top-level key, a missing required key, `format_version: 2`, a sixth tree key, a numeric `provenance.base_score`, and an empty `feature_names` — because a schema that accepts everything passes a corpus exactly as well as a correct one does.
+
+The JavaScript side asserts the same structural invariants by hand rather than gaining a schema-validation dev dependency, and additionally cross-checks the schema's own key sets against what the fixtures carry, so schema and corpus cannot drift apart unnoticed.
+
+Two `description` fields are required content rather than decoration: `objective` is documented as non-operative metadata that no predictor branches on (D028), and `intercept` as the single operative numeric value, with `provenance.base_score` read by nothing (D015).
+
+**A LICENCE file was missing entirely**, while `packages/js/package.json` and `packages/python/pyproject.toml` both declared `MIT`. Two manifests asserting a licence that the repository does not contain is a real release blocker, not a formality — it is also the kind of gap that no test would ever surface. MIT text added.
+
+**Release configuration exists and cannot fire.** `workflow_dispatch` only — no push, tag, or release trigger anywhere in the file — both jobs gated on an `environment: release` that does not exist, and neither has working credentials. Recorded honestly in the workflow itself that GitHub auto-creates a referenced environment without protection unless a human configures a reviewer rule, so that gate is only real once someone does. All four CI actions are now SHA-pinned to commit hashes resolved from the GitHub API (D024), none invented.
+
+**CI now needs Node in the Python job.** The parity harness shells out to `node` against a current `packages/js/dist/`, so `pytest` no longer runs standalone. Verified the requirement was real by deleting `dist/` and watching 20 parity tests fail rather than assuming.
+
+**That guard then caught me.** After editing `packages/js/src/types.ts` I ran the suite without rebuilding, and 23 tests failed — the staleness refusal from D049 working as designed. A parity number measured against a stale bundle describes code that is not the source, and this is the first time the guard fired against a real mistake rather than a test.
+
+**One correction to my own earlier work.** I had reported the stale `types.ts` header comment as fixed in Phase 7. It was not: the sentence wraps across two lines and my single-line replacement silently matched nothing, because I did not assert the substitution took effect. Fixed now, with an assertion.

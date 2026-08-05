@@ -1,5 +1,5 @@
-// Type-only declarations. No runtime values, no artifact format shape —
-// the artifact format has not been designed yet.
+// Type-only declarations. No runtime values. The artifact format's shape lives
+// in `artifact.ts`, which also carries its load-time validation.
 
 /**
  * Feature values for a single prediction, keyed by the model's exact

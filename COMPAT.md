@@ -208,6 +208,25 @@ installing the `export` extra, check your Python version before assuming
 the package metadata is wrong — it isn't; exporting genuinely requires
 3.12+, only reading and predicting do not.
 
+## Node.js version support
+
+`packages/js/package.json` declares `engines.node: ">=20"`. That is an
+advisory to npm and to tooling that reads `engines`; **`xgboost-predictor`
+does not itself check the Node version at runtime and cannot refuse an
+unsupported one the way the Python exporter refuses an unsupported XGBoost
+version** — there is no version-marker equivalent to gate on inside a JS
+runtime.
+
+What is actually verified, as opposed to merely declared: the Node test
+suite (92 tests), the full fixture-corpus comparison against XGBoost, and
+the cross-language parity harness have all been run, and pass with the
+same result, on **Node 20.19.0, 24.7.0, and 24.18.0**. That is the set of
+versions this compatibility policy can make a claim about. A Node runtime
+outside that set is not known to work and is not known to fail — it is
+simply untested, in the same sense an unprobed XGBoost version is untested
+(D018's reasoning, applied to the other side of the boundary, informally:
+there is no code-level refusal here, only an absence of evidence).
+
 ## Upstream hazards this library documents rather than papers over
 
 Two behaviors originate in XGBoost itself, not in this library, and are
@@ -346,13 +365,49 @@ The mirror-image failure hits `binary:logistic`: it would pass an absolute
 `1e-6` bound trivially in the clamp tail while being relatively `100%`
 wrong there, the exact case a float64 transform produces. (D033)
 
+## Measured accuracy of the two shipped predictors, on the full corpus
+
+The gates above are bounds. This is what the two predictors actually
+measured against them, on all 23 corpus fixtures (289 value rows plus 10
+rows both sides are expected to refuse), as recorded in `DECISIONS.md`
+D047–D049:
+
+- **Margin, bit-exact vs XGBoost:** **289/289** on both the Python and the
+  JavaScript predictor.
+- **Output, bit-exact vs XGBoost:** 283/289 on both predictors; the six
+  divergences are the same `(fixture, row)` pairs on both sides, at max
+  **relative** error `9.56e-08` (Python) and `9.555893664308718e-08`
+  (JavaScript) — both far inside the `1e-6` gate, and both are `libm`
+  rounding differences inside the bundled `exp`, expected by construction
+  rather than a defect (see the previous section).
+- **`survival:cox` rows that overflow to `+inf`:** 2/2 bit-exact.
+- **`binary:logistic` rows at the clamp floor:** 21/21 bit-exact at bit
+  pattern `0x0020bd47`, never `0.0`.
+- **Rows both predictors are expected to refuse:** 10/10 raise, on both
+  sides, with the same error kind.
+- **Cross-language parity, Python vs JavaScript, at both measurement
+  points:** exactly `0.0` — **0 margin-point mismatches, 0 output-point
+  mismatches, 0 refusal disagreements**, across all 299 compared rows.
+
+None of these numbers is a claim about a hypothetical future model — they
+are what running both predictors against this corpus, today, actually
+produced. A caller comparing this library's output against XGBoost's own
+should expect exactly this shape of result: bit-exact margins, and output
+differing from XGBoost by at most one `libm` rounding step, on a small,
+specifically-identified set of rows, never as a systematic drift.
+
 ## What this document does not yet cover
 
 The following are governed by decisions not yet made, evidence not yet
 gathered, or not yet recorded, and are intentionally absent above rather
 than guessed at:
 
-- Release and publishing mechanics (PyPI trusted publishing, npm
-  provenance) — no publish workflow exists in this repository yet.
+- Release and publishing mechanics. `.github/workflows/release.yml` defines
+  the intended PyPI (trusted publishing via OIDC) and npm (`--provenance`)
+  jobs, but that workflow triggers only on a manual `workflow_dispatch` and
+  gates its publish jobs on a deployment environment that does not exist
+  yet in this repository's settings — it cannot fire by pushing or tagging,
+  and it has never been executed. No version of either package has been
+  published under either name as of this writing.
 - AI-authorship disclosure text — deferred to the 1.0 announcement per D012,
   not part of this compatibility policy.
