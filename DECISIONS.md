@@ -621,3 +621,19 @@ Bit patterns handle `+inf`, `-inf`, `NaN`, and `-0.0` with no special cases at a
 Each fixture records the convention in `meta.nan_encoding` rather than leaving a reader to infer it.
 
 **Empirical note for anyone generating pruned models:** `tree_method="hist"` does not produce dead nodes at any `gamma`. It declines to grow a losing split rather than growing and then pruning one, so `num_deleted` stays `0`. `tree_method="exact"` is required to obtain a genuinely pruned tree, which is also what `probes/tree_structure.md` used. Discovered by measurement after several `gamma` values produced no deletions.
+
+---
+
+## D045 — Infinite feature values are refused up front, not lazily
+
+*2026-08-05* — **implements D022, which was specified but unimplemented**
+
+`walk_margin` validates the **entire** input row before walking, and raises `NonFiniteFeatureError` on any `±inf`. `NaN` is accepted: it is the missing value and routes by `default_left`.
+
+**This was a live gap, not a hardening exercise.** D022 recorded the decision on 2026-08-01 and `FORMAT.md` §9.3 restated it, but nothing implemented it. An adversarial fixture pass noticed. Verified before fixing: `walk_margin` with `+inf` in a feature returned `np.float32(13.74516)` — an ordinary-looking number. A specified refusal that no code performs is worse than an unspecified one, because the decision record makes it look handled.
+
+**Why the whole row rather than only the nodes visited.** A lazy check makes the same invalid input raise or not depending on which branches that particular tree takes — the outcome becomes a property of the model instead of the input. Cost is `O(features)` against an `O(depth × trees)` walk.
+
+Both variants were reverted and confirmed red: removing the guard turns 4 tests red; narrowing it to the first column only — the plausible lazy version — turns 2 red, including the test that exists specifically for a column no node reads.
+
+**A note on the threshold-side cast, from the adversarial measurements.** Of the six deliberately-broken walk variants, "cast the threshold but not the sample" produced only 1 wrong row in 184, while "cast the sample but not the threshold" produced 96. That asymmetry is expected and worth recording: this project's own emission rule (D044, `float(np.float32(x))` at full float64 precision) makes every stored threshold recover its exact float32 at any width, so there is no sub-ULP gap left for a mis-cast sample to exploit. The threshold-side cast is therefore defence for artifacts this exporter did **not** produce — hand-edited, third-party, or a future format revision — rather than for our own. It stays, and the reasoning is recorded so nobody later removes it as dead weight after measuring only against our own corpus.

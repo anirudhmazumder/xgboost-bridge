@@ -67,6 +67,7 @@ import numpy as np
 from .errors import (
     CategoricalSplitError,
     MalformedTreeError,
+    NonFiniteFeatureError,
     UnsupportedModelShapeError,
 )
 
@@ -529,7 +530,19 @@ def walk_margin(
     Correct implementation of this walk scored 5000/5000 bit-exact against
     ``predict(output_margin=True)`` at max absolute error ``0.0``, across three
     objectives and tree counts 0-1000 (``probes/accumulation.md`` section 6).
+
+    Raises:
+        :class:`~xgboost_bridge.errors.NonFiniteFeatureError`: a feature value
+            is infinite. ``NaN`` is accepted -- it is the missing value.
     """
+    # The whole row, before the walk: checking only at visited nodes would make
+    # the same invalid input raise or not depending on which branches this
+    # particular tree takes, i.e. a property of the model rather than of the
+    # input. Cost is O(features) against an O(depth x trees) walk. See D022.
+    for index, value in enumerate(feature_values):
+        if value == np.inf or value == -np.inf:
+            raise NonFiniteFeatureError(index, float(value))
+
     accumulator = np.float32(intercept)
 
     for tree in trees:

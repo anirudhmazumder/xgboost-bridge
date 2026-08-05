@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import functools
 import json
+import pathlib
 import math
 from collections.abc import Sequence
 from typing import Any, Callable, NamedTuple
@@ -84,6 +85,7 @@ import xgboost as xgb
 from xgboost_bridge.errors import (
     CategoricalSplitError,
     MalformedTreeError,
+    NonFiniteFeatureError,
     UnsupportedModelShapeError,
 )
 from xgboost_bridge.trees import (
@@ -1469,3 +1471,84 @@ def test_a_vector_leaf_model_is_refused() -> None:
     with pytest.raises(UnsupportedModelShapeError) as caught:
         extract_trees(model)
     assert caught.value.field == "size_leaf_vector"
+
+
+# --------------------------------------------------------------------------
+# D022: infinite feature values are refused; NaN is the missing value.
+#
+# These pin a guard that was specified in DECISIONS.md and FORMAT.md but was
+# not implemented until an adversarial fixture pass noticed the gap. Before
+# the guard, walk_margin returned an ordinary float for an infinite input --
+# a plausible wrong number, which is the failure this project exists to
+# prevent, reachable in shipped code.
+# --------------------------------------------------------------------------
+
+
+def _two_feature_split() -> list[dict[str, Any]]:
+    """One split on column 0; column 1 is never read by any node."""
+    return [
+        {
+            "default_left": [1, 0, 0],
+            "left_children": [1, -1, -1],
+            "node_values": [0.5, -1.0, 1.0],
+            "right_children": [2, -1, -1],
+            "split_indices": [0, 0, 0],
+        }
+    ]
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf")])
+def test_an_infinite_feature_value_is_refused(value: float) -> None:
+    with pytest.raises(NonFiniteFeatureError) as caught:
+        walk_margin(_two_feature_split(), 0.0, [value, 0.0])
+    assert caught.value.index == 0
+    assert caught.value.value == value
+
+
+def test_nan_is_the_missing_value_and_is_not_refused() -> None:
+    """NaN must NOT raise: it routes by default_left, which is model structure.
+
+    Refusing it would reject every model fitted on data with gaps.
+    """
+    margin = walk_margin(_two_feature_split(), 0.0, [float("nan"), 0.0])
+    assert margin == np.float32(-1.0)
+
+
+def test_an_infinity_in_a_column_no_node_reads_is_still_refused() -> None:
+    """The row is checked up front, not lazily at visited nodes.
+
+    Column 1 is never read by this tree. A lazy check would accept this input,
+    which would make the same invalid row raise or not depending on which
+    branches the tree happens to take -- an outcome that is a property of the
+    model rather than of the input. Reverting the guard to a per-node check
+    turns this test red and leaves the two above green.
+    """
+    with pytest.raises(NonFiniteFeatureError) as caught:
+        walk_margin(_two_feature_split(), 0.0, [0.25, float("inf")])
+    assert caught.value.index == 1
+
+
+def test_every_row_of_the_refusal_fixture_is_refused() -> None:
+    """The adversarial corpus records these rows as expected-to-raise.
+
+    The fixture deliberately carries no numeric ground truth for them, so this
+    is the only check that can confirm the recorded expectation is met.
+    """
+    path = (
+        pathlib.Path(__file__).resolve().parents[3]
+        / "fixtures"
+        / "corpus"
+        / "adversarial"
+        / "non_finite_input_refusal.json"
+    )
+    fixture = json.loads(path.read_text(encoding="utf-8"))
+    assert fixture["meta"]["expected_behavior"] == "raise"
+    artifact = fixture["artifact"]
+    assert fixture["rows"], "refusal fixture must carry rows"
+    for row in fixture["rows"]:
+        values = [
+            float("nan") if v is None else float(v) if not isinstance(v, str) else float(v)
+            for v in row
+        ]
+        with pytest.raises(NonFiniteFeatureError):
+            walk_margin(artifact["trees"], artifact["intercept"], values)

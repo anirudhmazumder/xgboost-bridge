@@ -383,3 +383,36 @@ class NonFiniteInterceptError(XGBoostBridgeError):
             f"{objective!r} from base_score {base_score!r}; a finite "
             "intercept is required"
         )
+
+
+class NonFiniteFeatureError(XGBoostBridgeError):
+    """Raised when a prediction input carries an infinite feature value.
+
+    ``NaN`` is **not** an error: it is the missing value, and it routes by the
+    node's ``default_left``. Only infinities raise.
+
+    Upstream is genuinely inconsistent here, which is why this library picks
+    one behaviour and pins it (D022): ``±inf`` raises through ``DMatrix`` but
+    is treated as an ordinary comparable value through ``inplace_predict``, so
+    the same input yields two different predictions from XGBoost depending on
+    the call path. Surfacing that class of divergence rather than silently
+    inheriting one side of it is the reason this library exists.
+
+    The whole row is checked before the walk begins, deliberately. Checking
+    lazily -- only at the nodes actually visited -- would mean the same
+    invalid input raises or not depending on which branches the tree happens
+    to take, making the outcome a property of the model rather than of the
+    input.
+
+    Attributes:
+        index: Column index of the offending value.
+        value: The value found, so a caller can tell ``+inf`` from ``-inf``.
+    """
+
+    def __init__(self, index: int, value: float) -> None:
+        self.index = index
+        self.value = value
+        super().__init__(
+            f"feature at index {index} is {value!r}; infinite feature values "
+            "are refused (NaN is the missing value and is accepted)"
+        )
