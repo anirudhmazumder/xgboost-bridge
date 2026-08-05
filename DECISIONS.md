@@ -637,3 +637,26 @@ Each fixture records the convention in `meta.nan_encoding` rather than leaving a
 Both variants were reverted and confirmed red: removing the guard turns 4 tests red; narrowing it to the first column only — the plausible lazy version — turns 2 red, including the test that exists specifically for a column no node reads.
 
 **A note on the threshold-side cast, from the adversarial measurements.** Of the six deliberately-broken walk variants, "cast the threshold but not the sample" produced only 1 wrong row in 184, while "cast the sample but not the threshold" produced 96. That asymmetry is expected and worth recording: this project's own emission rule (D044, `float(np.float32(x))` at full float64 precision) makes every stored threshold recover its exact float32 at any width, so there is no sub-ULP gap left for a mis-cast sample to exploit. The threshold-side cast is therefore defence for artifacts this exporter did **not** produce — hand-edited, third-party, or a future format revision — rather than for our own. It stays, and the reasoning is recorded so nobody later removes it as dead weight after measuring only against our own corpus.
+
+---
+
+## D046 — Bundled transform accuracy, and how its ULP bound must be measured
+
+*2026-08-05* — **implements D030 and D032**
+
+`transform.py` provides `exp_f32`, `sigmoid_f32`, and `identity_f32`, built from `+ − * /` and exact power-of-two scaling only. Measured against `mpmath` at 50 digits:
+
+| Function | Max ULP | Correctly rounded |
+|---|---|---|
+| `exp_f32` | **1** | 923049/1000000 |
+| `sigmoid_f32` | **2** | 765376/1000000 |
+
+Independently re-measured during review: `exp` 1 ULP over 60k points; `sigmoid` 2 ULP over 90k points above the clamp floor, with the reported worst inputs reproducing at exactly 2. The platform float32 exponential is in the same class — max 1 ULP, correctly rounded 99.55% — so the bundled version is not markedly worse, which is the only thing accuracy needed to establish. A compensated accumulation was tried and rejected: it does not lower the max ULP and costs six extra operations, and every extra operation is another way for the hand-written JavaScript port to diverge.
+
+**A ULP figure for `sigmoid_f32` is only meaningful above the clamp floor.** Below `f32(-88.7)` the implementation deliberately returns `3.006635794144578e-39` while an unclamped reference keeps falling, so comparing them reports the clamp as if it were error — measured as 1,560,434 ULP at margin `-89.99927` on a first attempt at verification. Below the floor the correct check is a **predicate** (does it return exactly the floor bit pattern, and never `0.0`), not a distance. Recorded because the naive sweep produces an alarming number that means nothing.
+
+**The sampling flaw worth recording.** The first 1e6-point sweep reported max ULP 1 for `sigmoid_f32` — wrong. Targeted boundary bands had consumed the whole point budget, leaving the random fill empty, while a 40,000-point uniform draw found 2 ULP at a rate of `3e-4`. Bands are now capped and a non-empty fill is asserted by a test whose only job is that. This is D040's lesson recurring in a different guise: a sweep that does not sample where the answer varies cannot find it, and a large point count is not evidence of coverage.
+
+**One structural check exists because no ULP measurement could replace it.** A drift to float64 intermediates would score *better* against `mpmath`, so accuracy cannot detect it. An AST scan therefore requires at most one arithmetic operation per statement and every one wrapped in `np.float32(...)`, and a token scan rejects `**`, `math.pow`, and every platform exponential by name.
+
+Constants are pinned twice: once as integer bit patterns, so the JavaScript port can assert the same integers, and once against `mpmath` for meaning (`_INV_LN2 == round(1/ln2)`, `_Cn == round(1/n!)`). The second check caught a transcription typo in the floor constant that the first would have happily pinned.
