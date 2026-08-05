@@ -577,3 +577,24 @@ An agent working on one module runs only its own test file during development, a
 **Why:** two agents editing disjoint modules still share one test suite. One reported an intermittent failure in the other's test file at roughly 1 run in 25 — a test that is fully deterministic, with a hand-built fixture and no randomness or shared state. Re-measured after both finished: **0 failures in 40 isolated runs and 24 full-suite runs.** The observation was a torn read — the suite imported a module mid-write, so a test asserting a guard ran against a version that did not yet have it.
 
 The cost of misdiagnosing this is high in both directions: chasing a nonexistent race, or dismissing a real flake as "probably concurrency." Neither is acceptable in a project whose entire premise is that intermittent wrongness is the dangerous kind.
+
+---
+
+## D043 — The intercept oracle is case-dependent, and a non-finite intercept is refused
+
+*2026-08-02* — **refines D034 and D036**
+
+**The oracle.** For a model with at least one tree, refit with zero boosting rounds and `base_score` passed explicitly, and compare against that margin. For a model that **already has zero trees**, compare against the source model's own margin.
+
+**Why the second case cannot use the first rule.** Passing `base_score` explicitly flips `boost_from_average` to `"0"` and puts the refit in link space. A zero-tree model with `boost_from_average == "1"` is correct precisely *because* its margin is the raw `base_score` (D036). Applying the refit rule there compares a raw-space intercept against a link-space oracle and **rejects a correct intercept** — specifically the one configuration the signed-zero fixture requires. Reading the source model's own margin is still XGBoost's observed output rather than a re-derivation, so D034's independent-oracle property is preserved. D034 as first written did not cover this cell.
+
+**Non-finite intercepts are refused at export.** `survival:cox` with `base_score = 0.0` derives `-inf` (bits `0xFF800000`); with any negative `base_score` it derives `NaN` (`0x7FC00000`). XGBoost accepts both with no error and no warning.
+
+The derivation **reproduces** them bit-for-bit, because the oracle above would otherwise disagree; the refusal therefore belongs at export, not in the derivation. Worth noting why the oracle alone is not enough: a bit-pattern comparison happily matches `NaN` against `NaN`, so what catches this is the finiteness requirement of §9.3, not the equality check.
+
+**Two probe reports are superseded on specific points**, recorded here rather than edited into the reports, which stand as records of what was measured when:
+
+- `probes/base_score_clamp.md` §8 concludes the logistic logarithm question is "not decidable" from 0 disagreements over 1432 values. That is a sampling artefact. A scan of *consecutive* float32 values in `[0.45, 0.55]`, where the logistic intercept's magnitude is small, finds **3621 disagreements in 2,516,584 values**, and XGBoost matches the float32 route 8/8 and the float64 route 0/8. D040 holds. The probe made the same sampling error it correctly identified in another report.
+- `probes/base_score.md` §9 step 3 states the logistic recipe with no clamp and a float64 logarithm. D035 and D040 supersede it. A reader following §9 alone reproduces the 13.8-in-margin-space defect.
+
+`SUPPORTED_OBJECTIVES` is currently defined in both `objectives.py` and `validate.py`, with a test pinning their agreement so they cannot drift silently. Collapsing them is a module-dependency question deferred rather than decided.

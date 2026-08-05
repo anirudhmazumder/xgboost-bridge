@@ -263,9 +263,16 @@ Getting this wrong does not merely shift a digit — because §6.2 requires the 
 
 ### 6.2 The export-time intercept check uses an independent oracle
 
-The exporter **MUST** validate the derived intercept against **XGBoost's own observed zero-tree margin** — fit the same configuration with zero boosting rounds, read `predict(output_margin=True)`, and require bit equality.
+The exporter **MUST** validate the derived intercept against **XGBoost's own observed margin on a tree-free model**, requiring bit equality. It **MUST NOT** validate by re-deriving the intercept from `base_score` and comparing the two derivations.
 
-It **MUST NOT** validate by re-deriving the intercept from `base_score` and comparing the two derivations.
+Which tree-free model, exactly, depends on the case — and getting this backwards makes the check reject correct intercepts:
+
+| Source model | Oracle |
+|---|---|
+| Has one or more trees | Fit a fresh model with **zero** boosting rounds, same objective, `base_score` passed **explicitly**, and read `predict(output_margin=True)` |
+| Already has zero trees | Use **the source model's own** margin directly |
+
+> **Why the zero-tree case cannot use the refit.** Passing `base_score` explicitly flips `boost_from_average` to `"0"`, which puts the refit in *link* space. But a zero-tree model whose `boost_from_average` is `"1"` is correct precisely *because* its margin is the **raw** `base_score` (§6.1). Refitting would compare a raw-space intercept against a link-space oracle and reject the one configuration §6.3 requires as a fixture. Reading the source model's own margin is still XGBoost's observed output rather than a re-derivation, so the independent-oracle property holds.
 
 > **Why this replaces the original check.** The first version of this rule compared the stored `base_score` against a re-derivation of the export recipe. Both sides ran the same recipe, so **an error in the recipe could not make the check fire** — and the `base_score` clamp above is exactly such an error, which that check would have passed. A validation whose oracle shares the defect it is looking for is decorative.
 >
@@ -533,6 +540,10 @@ Zero-boosting-round models serialize `"trees": []` — **present and empty, neve
 > Not version-dependent — re-measured byte-identical on XGBoost 3.4.0. It is API-path-dependent, which a version ceiling cannot defend against; only refusal can.
 
 **Neutralization self-check (§8.3).** Raise if any neutralized tree's walk disagrees with `predict(output_margin=True)`, and raise if the reachability marking disagrees with the `split_indices == 2147483647` marker.
+
+**Non-finite intercept.** Raise if the derived intercept is not finite, per §9.3.
+
+> This is reachable and XGBoost does not announce it. `survival:cox` with `base_score = 0.0` yields an intercept of `-inf` (bits `0xFF800000`), and with any negative `base_score` yields `NaN` (`0x7FC00000`) — both accepted by XGBoost with no error and no warning. The derivation reproduces them bit-for-bit, which is necessary for the oracle in §6.2 to agree, so the refusal belongs at export rather than in the derivation. Note that a bit-pattern oracle would happily match `NaN` against `NaN`: the check that catches this is the finiteness requirement, not the comparison.
 
 **Intercept agreement, against an independent oracle (§6.2).** Raise if the derived `intercept` disagrees bit-for-bit with **XGBoost's own zero-tree margin** for the same configuration. Python-only; costs nothing at runtime. Do **not** implement this as a comparison against a re-derivation of the export recipe — that check cannot fire on a recipe error, which is the class of error it exists to catch.
 
