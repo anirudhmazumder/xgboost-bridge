@@ -651,8 +651,8 @@ Source model had `base_score = 0.6`, so `intercept = -log(f32(f32(1/0.6) − 1))
   "objective": "binary:logistic",
   "output_transform": "sigmoid",
   "provenance": {
-    "base_score": 0.6000000238418579,
-    "exporter_version": "0.1.0",
+    "base_score": "[6E-1]",
+    "exporter_version": "0.1.0.dev0",
     "xgboost_version": "3.3.0"
   },
   "trees": [
@@ -683,4 +683,8 @@ Predicting `{"feature_a": 0.25, "feature_b": 9.0}`:
 
 Note that `feature_b` is never read by any split, yet it **must** still be present in the input: the key set must equal `feature_names` exactly (§7). Omitting it raises rather than being treated as missing — which is the entire point of D005, since a missing value is legitimate model structure and would silently produce a different, plausible number.
 
-Note also that keys are sorted at every level (§12), and that `provenance.base_score` is recorded but read by nothing.
+Note also that keys are sorted at every level (§12).
+
+**`provenance.base_score` is the raw string exactly as XGBoost stored it** — `"[6E-1]"`, a JSON string containing a bracketed array — not a parsed or float32-snapped number. It is copied through with zero interpretation.
+
+> **Why raw rather than tidied.** Provenance exists to record what the source model actually contained. A parsed, snapped number would be a *derived* value sitting in a block whose whole purpose is fidelity, and a derived number in a provenance block is an invitation for someone to use it — at which point the field stops being non-operative. The raw string cannot be mistaken for something a predictor should read, because nothing downstream accepts that shape. The operative intercept is `intercept`, and it is the only numeric field a predictor touches (§6).

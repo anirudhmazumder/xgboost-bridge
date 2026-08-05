@@ -345,3 +345,41 @@ class MalformedTreeError(XGBoostBridgeError):
         super().__init__(
             f"malformed tree structure: {field}={value!r}{where}, expected {expected}"
         )
+
+
+class NonFiniteInterceptError(XGBoostBridgeError):
+    """Raised when the derived margin intercept is not a finite number.
+
+    Reachable through ordinary parameters, and XGBoost does not announce it:
+    ``survival:cox`` with ``base_score = 0.0`` derives an intercept of
+    ``-inf``, and with any negative ``base_score`` derives ``NaN``. Both are
+    accepted at fit time with no error and no warning.
+
+    The derivation reproduces these values deliberately -- the export-time
+    oracle compares against XGBoost's own observed margin, so a derivation
+    that "fixed" them would disagree with the oracle. The refusal therefore
+    belongs at export rather than in the derivation.
+
+    Worth noting why the oracle alone does not catch this: a bit-pattern
+    comparison matches ``NaN`` against ``NaN`` perfectly well. What catches
+    it is the finiteness requirement, not the equality check.
+
+    Attributes:
+        intercept: The non-finite value that was derived.
+        objective: The objective in play, since the transform is
+            per-objective.
+        base_score: The stored ``base_score`` that produced it, verbatim, so
+            a caller can see which input was degenerate.
+    """
+
+    def __init__(
+        self, intercept: object, objective: str, base_score: object
+    ) -> None:
+        self.intercept = intercept
+        self.objective = objective
+        self.base_score = base_score
+        super().__init__(
+            f"derived a non-finite intercept {intercept!r} for objective "
+            f"{objective!r} from base_score {base_score!r}; a finite "
+            "intercept is required"
+        )
