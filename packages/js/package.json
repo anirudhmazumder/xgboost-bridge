@@ -15,7 +15,9 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md",
+    "LICENSE"
   ],
   "sideEffects": false,
   "engines": {
@@ -35,5 +37,10 @@
   "publishConfig": {
     "access": "public",
     "provenance": true
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anirudhmazumder/xgboost-bridge.git"
+  },
+  "homepage": "https://github.com/anirudhmazumder/xgboost-bridge#readme"
 }

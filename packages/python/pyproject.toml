@@ -5,11 +5,12 @@ description = "Export trained XGBoost models as portable JSON artifacts, with a 
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+license-files = ["LICENSE"]
 dependencies = ["numpy>=1.24"]
 
 [project.optional-dependencies]
 # Reading a fitted model requires XGBoost. Prediction and artifact inspection do not.
-export = ["xgboost>=3.3,<4"]
+export = ["xgboost==3.3.0"]
 
 [build-system]
 requires = ["hatchling"]

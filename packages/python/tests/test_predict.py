@@ -1216,6 +1216,180 @@ def test_a_row_that_is_not_a_mapping_raises(row: Any) -> None:
         predictor.margin(row)
 
 
+# ---------------------------------------------------------------------------
+# Strict feature *values*: D005 one level down. Nothing is coerced.
+# ---------------------------------------------------------------------------
+
+#: Values a prediction input may not carry, with the type each one reports.
+#: ``"nan"`` heads the list because it is the dangerous one: ``float("nan")``
+#: of that string is the **missing value**, so a lenient constructor turns a
+#: quoted number into a legitimate model branch and returns a confident wrong
+#: prediction with no error at all.
+_REFUSED_FEATURE_VALUES: tuple[tuple[str, Any, str], ...] = (
+    ("the string nan", "nan", "str"),
+    ("a quoted number", "0.5", "str"),
+    ("a quoted integer", "1", "str"),
+    ("the string inf", "inf", "str"),
+    ("an empty string", "", "str"),
+    ("True", True, "bool"),
+    ("False", False, "bool"),
+    ("None", None, "NoneType"),
+    ("a list", [0.5], "list"),
+    ("a tuple", (0.5,), "tuple"),
+    ("a dict", {"value": 0.5}, "dict"),
+    ("bytes", b"0.5", "bytes"),
+    ("an int too large for a float64", 10**400, "int"),
+    # numpy 2 spells this type's `__name__` "bool", like the builtin, while
+    # being a different type -- it is not an `np.integer`, so it is refused by
+    # the type test rather than by the `bool` branch.
+    ("a numpy bool", np.bool_(True), "bool"),
+    ("a complex number", complex(0.5, 0.0), "complex"),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "value", "type_name"),
+    _REFUSED_FEATURE_VALUES,
+    ids=[label for label, _value, _type in _REFUSED_FEATURE_VALUES],
+)
+def test_a_feature_value_that_is_not_a_number_raises(
+    label: str, value: Any, type_name: str
+) -> None:
+    """Structured, per FORMAT.md section 13: the name, the value, and its type.
+
+    ``float()`` accepts every string in this list. ``"nan"`` and ``"inf"``
+    would become the missing value and an infinity respectively -- one a
+    silent wrong number, the other a refusal raised for the wrong reason --
+    and ``True`` would become ``1.0``, which is a coercion rather than a
+    feature. ``10 ** 400`` is refused here rather than being allowed to
+    overflow to ``inf``, because ``float()`` raises ``OverflowError`` there,
+    which carries no structured attributes.
+    """
+    predictor = Predictor.from_json(_worked_example())
+    with pytest.raises(errors.InvalidFeatureValueError) as failure:
+        predictor.margin({"feature_a": value, "feature_b": 9.0})
+    assert failure.value.feature == "feature_a"
+    assert failure.value.value_type == type_name
+    assert failure.value.expected
+    # The value is carried verbatim, so a caller can log what arrived.
+    assert type(failure.value.value) is type(value)
+
+
+@pytest.mark.parametrize(
+    ("label", "value", "type_name"),
+    _REFUSED_FEATURE_VALUES,
+    ids=[label for label, _value, _type in _REFUSED_FEATURE_VALUES],
+)
+def test_output_refuses_the_same_values_as_margin(
+    label: str, value: Any, type_name: str
+) -> None:
+    predictor = Predictor.from_json(_worked_example())
+    with pytest.raises(errors.InvalidFeatureValueError):
+        predictor.output({"feature_a": value, "feature_b": 9.0})
+
+
+def test_a_refused_value_in_any_column_raises() -> None:
+    """Not only the first column: every value is checked, in order."""
+    predictor = Predictor.from_json(_worked_example())
+    with pytest.raises(errors.InvalidFeatureValueError) as failure:
+        predictor.margin({"feature_a": 0.25, "feature_b": "9.0"})
+    assert failure.value.feature == "feature_b"
+
+
+def test_the_refusal_is_a_bridge_error_a_caller_can_catch() -> None:
+    """Not a bare ``TypeError`` or ``OverflowError`` escaping the library."""
+    predictor = Predictor.from_json(_worked_example())
+    for value in (None, [0.5], 10**400):
+        with pytest.raises(errors.XGBoostBridgeError):
+            predictor.margin({"feature_a": value, "feature_b": 9.0})
+
+
+_ACCEPTED_FEATURE_VALUES: tuple[tuple[str, Any], ...] = (
+    ("a Python float", 0.25),
+    ("a Python int", 1),
+    ("a negative int", -3),
+    ("a float32", np.float32(0.25)),
+    ("a float64", np.float64(0.25)),
+    ("an int64", np.int64(1)),
+    ("an int32", np.int32(-3)),
+    ("a float16", np.float16(0.25)),
+    ("negative zero", -0.0),
+)
+
+
+@pytest.mark.parametrize(
+    ("label", "value"),
+    _ACCEPTED_FEATURE_VALUES,
+    ids=[label for label, _value in _ACCEPTED_FEATURE_VALUES],
+)
+def test_real_numbers_are_still_accepted(label: str, value: Any) -> None:
+    """The refusal must not narrow what a caller can legitimately pass.
+
+    ``numpy`` scalars are included deliberately: iterating a matrix row --
+    which is how a caller ordinarily builds a mapping -- hands out
+    ``np.float64`` values, and ``np.float32`` arrives from anything already
+    narrowed.
+    """
+    predictor = Predictor.from_json(_worked_example())
+    got = predictor.margin({"feature_a": value, "feature_b": 9.0})
+    expected = predictor.margin({"feature_a": float(value), "feature_b": 9.0})
+    assert _bits(got) == _bits(expected)
+
+
+def test_a_real_nan_is_still_the_missing_value_and_still_routes_by_default_left() -> None:
+    """The value a caller passes when they mean "missing", both directions.
+
+    The point of the refusal above is that this remains the *only* way to say
+    it. If the string ``"nan"`` also worked, a quoted-number producer would
+    reach this branch by accident.
+    """
+    artifact = _artifact(
+        trees=[
+            {
+                "default_left": [1, 0, 0],
+                "left_children": [1, -1, -1],
+                "node_values": [0.5, -0.25, 0.75],
+                "right_children": [2, -1, -1],
+                "split_indices": [0, 0, 0],
+            }
+        ],
+        intercept=0.0,
+    )
+    left = Predictor.from_json(artifact)
+    assert _bits(left.margin({"feature_a": float("nan"), "feature_b": 1.0})) == _bits(-0.25)
+    assert _bits(left.margin({"feature_a": np.float32("nan"), "feature_b": 1.0})) == _bits(
+        -0.25
+    )
+    with pytest.raises(errors.InvalidFeatureValueError):
+        left.margin({"feature_a": "nan", "feature_b": 1.0})
+
+    artifact["trees"][0]["default_left"] = [0, 0, 0]
+    right = Predictor.from_json(artifact)
+    assert _bits(right.margin({"feature_a": float("nan"), "feature_b": 1.0})) == _bits(0.75)
+    with pytest.raises(errors.InvalidFeatureValueError):
+        right.margin({"feature_a": "nan", "feature_b": 1.0})
+
+
+def test_an_infinite_value_still_raises_the_refusal_that_owns_it() -> None:
+    """``±inf`` is a number, so it passes the type check and reaches D045's
+    refusal in the walk. The two refusals must not be confused: one is "not a
+    number", the other is "a number this library declines"."""
+    predictor = Predictor.from_json(_worked_example())
+    for value in (float("inf"), float("-inf"), np.float32("inf")):
+        with pytest.raises(errors.NonFiniteFeatureError):
+            predictor.margin({"feature_a": value, "feature_b": 9.0})
+
+
+def test_a_batch_helper_refuses_a_non_numeric_value_too() -> None:
+    predictor = Predictor.from_json(_worked_example())
+    rows = [
+        {"feature_a": 0.25, "feature_b": 9.0},
+        {"feature_a": "0.25", "feature_b": 9.0},
+    ]
+    with pytest.raises(errors.InvalidFeatureValueError):
+        predictor.margins(rows)
+
+
 def test_key_order_in_the_input_does_not_matter() -> None:
     predictor = Predictor.from_json(_worked_example())
     forward = predictor.margin({"feature_a": 0.25, "feature_b": 9.0})
@@ -1229,7 +1403,15 @@ def test_key_order_in_the_input_does_not_matter() -> None:
 
 #: The functions a prediction actually passes through.
 PREDICTION_PATH_FUNCTIONS = frozenset(
-    {"margin", "output", "margins", "outputs", "_collect", "_feature_row"}
+    {
+        "margin",
+        "output",
+        "margins",
+        "outputs",
+        "_collect",
+        "_feature_row",
+        "_feature_value",
+    }
 )
 
 

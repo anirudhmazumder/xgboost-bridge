@@ -23,6 +23,16 @@ checked for finiteness and verified against XGBoost's own observed margin --
 never the other way around, because a non-finite value would otherwise reach
 an oracle comparison that cannot distinguish ``NaN`` from ``NaN`` (D043).
 
+The assembled artifact is then walked and compared against XGBoost's own
+``predict(output_margin=True)``, bit-for-bit, which FORMAT.md section 8.3 and
+D027 both make mandatory (:func:`_verify_against_source_margin`). Every
+structural check upstream of it validates *deadness detection* -- that the
+``split_indices == 2147483647`` marker agrees with reachability -- and none of
+them validates the arrays neutralization produced. A neutralization that
+cleared a node the walk actually visits, or a value read out of the wrong
+source array, passes every one of those checks and shows up only as a
+different number.
+
 ``provenance`` carries ``xgboost_version``, ``base_score`` (the value exactly
 as XGBoost stored it, with no parsing and no float32 transform applied here),
 and ``exporter_version``. **No predictor reads any field of ``provenance``.**
@@ -35,18 +45,21 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
+
+import numpy as np
 
 from ._version import __version__
 from .errors import (
     MalformedTreeError,
+    MarginMismatchError,
     NonFiniteInterceptError,
     UnsupportedModelShapeError,
     UnsupportedObjectiveError,
 )
 from .objectives import OUTPUT_TRANSFORMS, derive_intercept, verify_intercept
-from .trees import extract_trees
+from .trees import LEAF_CHILD, extract_trees, walk_margin
 from .validate import validate_source_model
 
 __all__ = ["DEFAULT_TESTED_VERSIONS", "export_model", "to_json"]
@@ -127,6 +140,10 @@ def export_model(
             intercept disagrees with XGBoost's own observed zero-tree margin
             (FORMAT.md section 6.2) -- the independent-oracle check, not a
             re-derivation of this module's own recipe.
+        :class:`~xgboost_bridge.errors.MarginMismatchError`: the assembled
+            artifact's own walk disagrees with XGBoost's
+            ``predict(output_margin=True)`` on any self-check row (FORMAT.md
+            section 8.3, D027).
 
     The gate runs first, on the caller-supplied feature names already
     written into the parsed document, so a bare-array model with names
@@ -173,6 +190,7 @@ def export_model(
         "provenance": _build_provenance(document),
     }
     _assert_envelope_keys(artifact)
+    _verify_against_source_margin(booster, artifact)
     return artifact
 
 
@@ -196,6 +214,234 @@ def _apply_feature_name_override(document: dict[str, Any], feature_names: Iterab
                 location="feature_names (caller-supplied)",
             )
     document["learner"]["feature_names"] = names
+
+
+# The interval sentinels of the self-check's row construction below. float32,
+# because every bound is a float32 threshold and the walk compares in float32.
+_UNBOUNDED_BELOW = np.float32(-np.inf)
+_UNBOUNDED_ABOVE = np.float32(np.inf)
+
+
+def _verify_against_source_margin(booster: Any, artifact: dict[str, Any]) -> None:
+    """Walk the assembled artifact and require XGBoost's own margin, bit-for-bit.
+
+    The mandatory self-check of FORMAT.md section 8.3 and D027. It is the only
+    check in this module that examines the *result* of neutralization rather
+    than the evidence for it: :func:`xgboost_bridge.trees.neutralize_dead_nodes`
+    asserts that the ``split_indices == 2147483647`` marker agrees with
+    reachability, which validates deadness *detection*. A neutralization that
+    cleared a live node, or a value read out of the wrong source array -- the
+    ``base_weights``-instead-of-``split_conditions`` confusion is off by
+    ``5.10`` in margin space (FORMAT.md section 15) -- satisfies every
+    structural check and differs only in the numbers.
+
+    Args:
+        booster: The source ``xgboost.Booster``, used only as the oracle.
+        artifact: The assembled artifact, read for its ``trees``,
+            ``intercept`` and ``feature_names``.
+
+    Raises:
+        :class:`~xgboost_bridge.errors.MarginMismatchError`: any sampled row's
+            margin differs from XGBoost's in a single bit.
+        :class:`~xgboost_bridge.errors.MalformedTreeError`: XGBoost returned a
+            margin whose shape is not one value per row, so there is nothing
+            scalar to compare against.
+
+    **What the oracle is, and why it cannot share the defect.** The oracle is
+    XGBoost's ``predict(output_margin=True)`` on the same rows -- the engine
+    that produced the model, reading its own untouched in-memory trees.
+    Nothing in this library's extraction, neutralization, or emission path
+    contributes to it, so a defect in any of them cannot move both sides
+    together. The walk is
+    :func:`xgboost_bridge.trees.walk_margin`, the normative one, not a second
+    implementation written for this check.
+
+    The comparison is on float32 bit patterns rather than ``==``, because
+    ``-0.0 == 0.0`` is ``True`` and the two are different artifacts. Note that
+    it deliberately does *not* subsume the finiteness refusal above: a
+    ``NaN`` intercept would make both sides ``NaN``, and ``NaN`` bit patterns
+    match perfectly well (D043).
+    """
+    import xgboost  # noqa: PLC0415 -- optional extra; see D010
+
+    trees = artifact["trees"]
+    intercept = artifact["intercept"]
+    rows = _self_check_rows(trees, len(artifact["feature_names"]))
+
+    # `booster.feature_names`, not the artifact's: measured, ``predict`` raises
+    # ``ValueError`` unless the matrix carries the model's own names, or no
+    # names at all when the model has none. A caller-supplied override
+    # (D021) renames columns in the artifact and must not reach the oracle.
+    matrix = xgboost.DMatrix(rows, feature_names=booster.feature_names, nthread=1)
+    observed = np.asarray(booster.predict(matrix, output_margin=True), dtype=np.float32)
+    if observed.shape != (len(rows),):
+        # The arity gate (D017) already refuses multi-output models, so this is
+        # unreachable through a validated model. It is here because the
+        # alternative to a structured refusal is comparing a scalar against a
+        # row of values, which is an unstructured `TypeError` at best.
+        raise MalformedTreeError(
+            "<observed margin>",
+            observed.shape,
+            f"one margin per row, i.e. shape ({len(rows)},)",
+            None,
+        )
+
+    mismatches = 0
+    first: tuple[int, float, float] | None = None
+    for index in range(len(rows)):
+        derived = walk_margin(trees, intercept, rows[index])
+        if int(derived.view(np.uint32)) != int(observed[index].view(np.uint32)):
+            mismatches += 1
+            if first is None:
+                first = (index, float(derived), float(observed[index]))
+    if first is not None:
+        raise MarginMismatchError(first[0], first[1], first[2], mismatches, len(rows))
+
+
+def _self_check_rows(
+    trees: Sequence[Mapping[str, Any]], feature_count: int
+) -> np.ndarray:
+    """Build the deterministic sample :func:`_verify_against_source_margin` walks.
+
+    Two blocks, and the composition is the whole argument for the check being
+    worth anything:
+
+    * **One row per live leaf**, constructed rather than drawn, so the sample
+      reaches every node the walk can visit. See
+      :func:`_leaf_reaching_rows` for the construction and for why "every
+      live leaf" is the same coverage as "every live node".
+    * **A missing-value block**: one row of all ``NaN``, and one row per column
+      carrying ``NaN`` in that column alone. ``NaN`` is the missing value and
+      routes by ``default_left`` (FORMAT.md section 9.3), which is a branch
+      the constructed rows never take -- every value they carry is a real
+      number, so a defect confined to the missing-value direction would be
+      invisible to them.
+
+    No row carries ``±inf``: those are refused at predict time (D022, D045),
+    and a sample that raises rather than comparing would verify nothing.
+
+    Rows are ``float64``, which is what a caller has in hand and what the walk
+    documents as its input; every value in them is float32-exact, so the
+    walk's narrowing changes none of them.
+    """
+    rows = _leaf_reaching_rows(trees, feature_count)
+    rows.extend(_missing_value_rows(feature_count))
+    return np.asarray(rows, dtype=np.float64)
+
+
+def _leaf_reaching_rows(
+    trees: Sequence[Mapping[str, Any]], feature_count: int
+) -> list[np.ndarray]:
+    """One row per live leaf of every tree, each row reaching that leaf.
+
+    Each tree is descended from node ``0`` carrying, per column, the interval
+    ``[lower, upper)`` of values consistent with the branches taken so far:
+    going left at threshold ``t`` requires ``value < t``, and going right
+    requires ``value >= t``, because the operator is strict ``<`` and equality
+    routes right. At a leaf the interval is realized as one row.
+
+    **Why covering the leaves covers every live node.** A live node is either
+    a leaf or has children, and if a node's interval is non-empty then at
+    least one child's is too -- any value in it is either below the threshold
+    or not. So every live node with a non-empty interval is an ancestor of at
+    least one live leaf with a non-empty interval, and the row that reaches
+    that leaf passes through it. A node whose interval *is* empty is reachable
+    in the graph but reachable by **no input at all**, so no row can exist for
+    it and no change to it can alter any prediction.
+
+    Rows are deduplicated on their exact bytes: identical intervals recur
+    across trees, and a duplicate row costs a full walk while proving nothing
+    new. Order is otherwise the order of construction, so the sample is
+    deterministic -- nothing here consults a clock, an environment, or a
+    random source.
+    """
+    rows: list[np.ndarray] = []
+    seen: set[bytes] = set()
+    for tree in trees:
+        left_children = tree["left_children"]
+        right_children = tree["right_children"]
+        split_indices = tree["split_indices"]
+        node_values = tree["node_values"]
+
+        pending: list[tuple[int, np.ndarray, np.ndarray]] = [
+            (
+                0,
+                np.full(feature_count, _UNBOUNDED_BELOW, dtype=np.float32),
+                np.full(feature_count, _UNBOUNDED_ABOVE, dtype=np.float32),
+            )
+        ]
+        while pending:
+            node, lower, upper = pending.pop()
+            if left_children[node] != LEAF_CHILD:
+                column = split_indices[node]
+                threshold = np.float32(node_values[node])
+                left_upper = upper.copy()
+                if threshold < left_upper[column]:
+                    left_upper[column] = threshold
+                right_lower = lower.copy()
+                if threshold > right_lower[column]:
+                    right_lower[column] = threshold
+                pending.append((left_children[node], lower.copy(), left_upper))
+                pending.append((right_children[node], right_lower, upper.copy()))
+                continue
+            row = _representative_row(lower, upper, feature_count)
+            if row is None:
+                continue
+            key = row.tobytes()
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(row)
+    return rows
+
+
+def _representative_row(
+    lower: np.ndarray, upper: np.ndarray, feature_count: int
+) -> np.ndarray | None:
+    """One row satisfying ``lower[c] <= row[c] < upper[c]`` for every column.
+
+    Returns ``None`` when some column's interval is empty, which means the
+    path those bounds describe is taken by no input whatsoever.
+
+    The value chosen per column is the *boundary* wherever there is one --
+    ``lower`` when it is finite, and otherwise the float32 immediately below
+    ``upper``. That is deliberate rather than incidental: a threshold and the
+    value adjacent to it are exactly where a one-sided float32 cast, a
+    non-strict comparison, or an equality routed the wrong way changes the
+    branch, so the sample sits on the boundary instead of near it. An
+    unconstrained column takes ``0.0``, which no threshold in the model
+    excludes.
+    """
+    row = np.zeros(feature_count, dtype=np.float64)
+    for column in range(feature_count):
+        low = lower[column]
+        high = upper[column]
+        if low == _UNBOUNDED_BELOW:
+            if high == _UNBOUNDED_ABOVE:
+                continue
+            row[column] = float(np.nextafter(high, _UNBOUNDED_BELOW))
+        elif low < high:
+            row[column] = float(low)
+        else:
+            return None
+    return row
+
+
+def _missing_value_rows(feature_count: int) -> list[np.ndarray]:
+    """The ``NaN`` block: all columns missing, then each column alone.
+
+    ``NaN`` is the missing value and routes by ``default_left``; it is not an
+    error (FORMAT.md section 9.3). One row per column, rather than only an
+    all-``NaN`` row, because the all-``NaN`` row takes the default direction at
+    every node it visits and so cannot distinguish a per-node ``default_left``
+    that is read from the wrong column.
+    """
+    rows = [np.full(feature_count, np.nan, dtype=np.float64)]
+    for column in range(feature_count):
+        row = np.zeros(feature_count, dtype=np.float64)
+        row[column] = np.nan
+        rows.append(row)
+    return rows
 
 
 def _build_provenance(document: dict[str, Any]) -> dict[str, Any]:

@@ -33,7 +33,7 @@ import pytest
 import xgboost as xgb
 
 from xgboost_bridge import errors, export
-from xgboost_bridge.trees import walk_margin
+from xgboost_bridge.trees import extract_trees, reachable_nodes, walk_margin
 
 OBJECTIVES = ("reg:squarederror", "binary:logistic", "survival:cox")
 
@@ -48,12 +48,21 @@ def _fit(
     num_boost_round: int = 6,
     base_score: float | None = None,
     seed: int = 20260804,
+    gamma: float | None = None,
+    max_depth: int | None = None,
 ) -> tuple[xgb.Booster, np.ndarray, list[str]]:
     """Fit a small, real, deterministic model and return it with its inputs.
 
     ``tree_method="exact"`` and ``nthread=1`` are what make training itself
     reproducible across processes -- required for the separate-interpreter
     determinism check below, not merely a style choice here.
+
+    ``gamma`` and ``max_depth`` are omitted from ``params`` unless given, so
+    every test written before they existed fits exactly the model it always
+    did. A ``gamma`` above zero is what produces a **pruned** tree, i.e. one
+    with dead nodes -- and it only works under ``tree_method="exact"``:
+    ``hist`` declines to grow a losing split rather than growing and then
+    pruning one, so it yields ``num_deleted == 0`` at every ``gamma``.
     """
     rng = np.random.default_rng(seed)
     x = rng.normal(size=(rows, cols))
@@ -77,6 +86,10 @@ def _fit(
     params["seed"] = seed
     if base_score is not None:
         params["base_score"] = float(base_score)
+    if gamma is not None:
+        params["gamma"] = float(gamma)
+    if max_depth is not None:
+        params["max_depth"] = int(max_depth)
 
     booster = xgb.train(params, dtrain, num_boost_round=num_boost_round, verbose_eval=False)
     return booster, x, names
@@ -531,6 +544,298 @@ def test_round_trip_through_the_walk_matches_predict_bit_for_bit(objective: str)
 
     assert exact == total, f"{objective}: {exact}/{total} bit-exact; first mismatch {first_mismatch}"
     print(f"{objective}: round-trip {exact}/{total} bit-exact")
+
+
+# ---------------------------------------------------------------------------
+# 7. The neutralization self-check (FORMAT.md section 8.3, D027).
+#
+# Every check upstream of it validates deadness *detection* -- that the
+# `split_indices == 2147483647` marker agrees with reachability. None of them
+# validates the arrays neutralization produced, and a neutralization that
+# cleared a live node is silent wrongness. The oracle here is XGBoost's own
+# `predict(output_margin=True)`, which shares nothing with this library's
+# extraction, neutralization, or emission path.
+#
+# Note what the round-trip test above cannot cover: `_fit` set no `gamma`
+# until now, so no export-level test had ever seen a tree with a dead node.
+# The tests below fit a pruned model and assert `num_deleted > 0`, so they
+# cannot silently stop covering the case.
+# ---------------------------------------------------------------------------
+
+_PRUNED_MODEL = {
+    "objective": "binary:logistic",
+    "rows": 600,
+    "cols": 5,
+    "num_boost_round": 4,
+    "gamma": 5.0,
+    "max_depth": 6,
+}
+
+
+def _fit_pruned() -> tuple[xgb.Booster, np.ndarray, list[str]]:
+    """A real, deterministic, ``gamma``-pruned model: dead nodes and all."""
+    return _fit(**_PRUNED_MODEL)  # type: ignore[arg-type]
+
+
+def _dead_node_counts(booster: xgb.Booster) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Per-tree dead-node counts, read two independent ways.
+
+    ``tree_param.num_deleted`` is XGBoost's own count, as a JSON string.
+    The second count is the number of ``split_indices`` entries carrying the
+    ``2147483647`` marker. Both are read from the *source* model, before this
+    library touches anything, and a test that compared only one of them
+    against itself would pin nothing.
+    """
+    document = json.loads(booster.save_raw(raw_format="json"))
+    source_trees = document["learner"]["gradient_booster"]["model"]["trees"]
+    reported = tuple(int(tree["tree_param"]["num_deleted"]) for tree in source_trees)
+    marked = tuple(
+        sum(1 for value in tree["split_indices"] if value == 2147483647)
+        for tree in source_trees
+    )
+    return reported, marked
+
+
+def test_the_self_check_model_really_carries_dead_nodes() -> None:
+    """The precondition every test in this section depends on.
+
+    ``tree_method="hist"`` produces no dead nodes at any ``gamma``; ``exact``
+    is required. Asserted rather than assumed, so this section cannot quietly
+    become a test of unpruned trees.
+    """
+    booster, _x, names = _fit_pruned()
+    reported, marked = _dead_node_counts(booster)
+    assert reported == marked, (
+        f"XGBoost's own num_deleted {reported} disagrees with the "
+        f"2147483647 marker count {marked}"
+    )
+    assert sum(reported) > 0, "the model carries no dead nodes at all"
+    assert all(count > 0 for count in reported), (
+        f"some tree carries no dead node: {reported}"
+    )
+    print(f"pruned self-check model: num_deleted per tree {reported}, total {sum(reported)}")
+
+    # And it exports, which is the other half of the claim: a pruned model is
+    # ordinary artifact content, not a refusal (FORMAT.md section 8.3).
+    artifact = export.export_model(booster, feature_names=names)
+    assert len(artifact["trees"]) == len(reported)
+
+
+def test_the_self_check_sample_reaches_every_live_node() -> None:
+    """The sufficiency claim, made executable against an independent oracle.
+
+    ``_self_check_rows`` claims to reach every node the walk can visit. The
+    oracle is XGBoost's ``pred_leaf``, which reports the node index of the
+    leaf **it** landed on, per row and per tree -- not this library's walk, so
+    a defect in the walk cannot make the coverage look complete. Every live
+    leaf must be reported, and every live node is then covered because it is
+    an ancestor of a reported leaf.
+    """
+    booster, _x, names = _fit_pruned()
+    artifact = export.export_model(booster, feature_names=names)
+    trees = artifact["trees"]
+    rows = export._self_check_rows(trees, len(names))
+
+    reached = np.asarray(
+        booster.predict(
+            xgb.DMatrix(rows, feature_names=booster.feature_names, nthread=1),
+            pred_leaf=True,
+        )
+    ).reshape(len(rows), -1)
+    assert reached.shape == (len(rows), len(trees))
+
+    total_live = 0
+    for index, tree in enumerate(trees):
+        live = reachable_nodes(tree)
+        total_live += len(live)
+        live_leaves = {node for node in live if tree["left_children"][node] == -1}
+        reported = {int(value) for value in reached[:, index]}
+        assert reported <= live_leaves, (
+            f"tree {index}: XGBoost reported leaves outside the live set: "
+            f"{sorted(reported - live_leaves)}"
+        )
+        assert reported == live_leaves, (
+            f"tree {index}: {len(live_leaves) - len(reported)} live leaves are "
+            f"reached by no sampled row: {sorted(live_leaves - reported)}"
+        )
+
+        parent = {}
+        for node in live:
+            if tree["left_children"][node] != -1:
+                parent[tree["left_children"][node]] = node
+                parent[tree["right_children"][node]] = node
+        covered: set[int] = set()
+        for leaf in reported:
+            node = leaf
+            while True:
+                covered.add(node)
+                if node not in parent:
+                    break
+                node = parent[node]
+        assert covered == live, (
+            f"tree {index}: live nodes reached by no sampled row: "
+            f"{sorted(live - covered)}"
+        )
+
+    assert total_live >= 30, f"only {total_live} live nodes; the check is near-vacuous"
+    print(
+        f"self-check sample: {len(rows)} rows cover {total_live} live nodes "
+        f"across {len(trees)} trees"
+    )
+
+
+def test_the_self_check_sample_is_deterministic() -> None:
+    """Two builds, byte-identical -- including the ``NaN`` block's bit patterns.
+
+    Compared on ``tobytes()`` rather than with ``==``, since ``NaN != NaN``
+    and ``-0.0 == 0.0``.
+    """
+    booster, _x, names = _fit_pruned()
+    trees = export.export_model(booster, feature_names=names)["trees"]
+    first = export._self_check_rows(trees, len(names))
+    second = export._self_check_rows(trees, len(names))
+    assert first.shape == second.shape
+    assert first.tobytes() == second.tobytes()
+
+
+def _clear_one_live_node(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """``extract_trees``, then neutralize a node the walk actually visits.
+
+    The corruption lives here, in a copy of the export flow, and never in
+    ``trees.py``: the point is to demonstrate that the self-check fires on a
+    defect no other check can see, which requires the real extraction to run
+    first. It is imported from ``trees`` rather than reached through
+    ``export.extract_trees``, which is the name being replaced.
+    """
+    trees = extract_trees(document)
+    victim = sorted(reachable_nodes(trees[0]))[1]
+    trees[0]["split_indices"][victim] = 0
+    trees[0]["node_values"][victim] = 0.0
+    trees[0]["left_children"][victim] = -1
+    trees[0]["right_children"][victim] = -1
+    trees[0]["default_left"][victim] = 0
+    return trees
+
+
+def test_export_refuses_an_artifact_whose_live_node_was_cleared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure FORMAT.md section 8.3 names: a cleared *live* node.
+
+    Nothing structural detects it. The cleared node is a well-formed leaf
+    carrying ``0.0``, which is legitimate artifact content, its
+    ``split_indices`` entry is in range, and the reachability marker still
+    agrees with itself. Only the comparison against XGBoost's own margin sees
+    it.
+    """
+    booster, _x, names = _fit_pruned()
+    monkeypatch.setattr(export, "extract_trees", _clear_one_live_node)
+
+    with pytest.raises(errors.MarginMismatchError) as failure:
+        export.export_model(booster, feature_names=names)
+
+    error = failure.value
+    assert error.mismatches >= 1
+    assert error.rows_compared >= error.mismatches
+    assert 0 <= error.row_index < error.rows_compared
+    assert np.float32(error.derived).view(np.uint32) != np.float32(
+        error.observed
+    ).view(np.uint32)
+    print(
+        f"cleared live node: refused on {error.mismatches}/{error.rows_compared} "
+        f"rows, first margin error {abs(error.derived - error.observed):.6f}"
+    )
+
+
+def _read_base_weights_instead(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """``extract_trees``, then take ``node_values`` from the wrong source array.
+
+    ``base_weights`` is the sibling array a plausible misreading picks up: it
+    is per-node, the same length, and finite everywhere, so every structural
+    check passes. FORMAT.md section 15 records it as off by ``5.10`` in margin
+    space.
+    """
+    trees = extract_trees(document)
+    source_trees = document["learner"]["gradient_booster"]["model"]["trees"]
+    for tree, source in zip(trees, source_trees):
+        tree["node_values"] = [float(np.float32(value)) for value in source["base_weights"]]
+    return trees
+
+
+def test_export_refuses_node_values_read_from_the_wrong_source_array(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``base_weights`` instead of ``split_conditions``: same shape, wrong numbers."""
+    booster, _x, names = _fit_pruned()
+    monkeypatch.setattr(export, "extract_trees", _read_base_weights_instead)
+
+    with pytest.raises(errors.MarginMismatchError) as failure:
+        export.export_model(booster, feature_names=names)
+    error = failure.value
+    assert error.mismatches >= 1
+    print(
+        f"base_weights substitution: refused on "
+        f"{error.mismatches}/{error.rows_compared} rows, first margin error "
+        f"{abs(error.derived - error.observed):.6f}"
+    )
+
+
+class _DoubledMarginBooster:
+    """A booster whose ``predict`` returns two margins per row.
+
+    The arity gate (D017) refuses multi-output models, so this shape cannot
+    arrive through a validated model -- which is exactly why it is driven
+    directly rather than left as an untested branch. Without the shape check
+    the self-check would compare a scalar against a row of values.
+    """
+
+    def __init__(self, booster: xgb.Booster) -> None:
+        self._booster = booster
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._booster, name)
+
+    def predict(self, *args: Any, **kwargs: Any) -> Any:
+        margin = np.asarray(self._booster.predict(*args, **kwargs))
+        return np.column_stack([margin, margin])
+
+
+def test_the_self_check_refuses_a_margin_that_is_not_one_value_per_row() -> None:
+    booster, _x, names = _fit_pruned()
+    with pytest.raises(errors.MalformedTreeError) as failure:
+        export.export_model(_DoubledMarginBooster(booster), feature_names=names)
+    assert failure.value.field == "<observed margin>"
+
+
+def test_the_self_check_runs_on_every_objective_and_agrees() -> None:
+    """The clean side of the check: it passes, and on rows that sit ON the
+    thresholds rather than near them.
+
+    Every row of the sample is a boundary value -- the threshold itself, or
+    the float32 immediately below it -- which is where a one-sided float32
+    cast or an equality routed the wrong way changes the branch. That the
+    walk agrees with XGBoost on all of them is a stronger statement than
+    agreement on ordinary rows.
+    """
+    for objective in OBJECTIVES:
+        booster, _x, names = _fit(objective, gamma=2.0, max_depth=6, num_boost_round=5)
+        artifact = export.export_model(booster, feature_names=names)
+        rows = export._self_check_rows(artifact["trees"], len(names))
+        observed = np.asarray(
+            booster.predict(
+                xgb.DMatrix(rows, feature_names=booster.feature_names, nthread=1),
+                output_margin=True,
+            ),
+            dtype=np.float32,
+        )
+        exact = sum(
+            1
+            for index in range(len(rows))
+            if int(walk_margin(artifact["trees"], artifact["intercept"], rows[index]).view(np.uint32))
+            == int(observed[index].view(np.uint32))
+        )
+        assert exact == len(rows), f"{objective}: {exact}/{len(rows)} bit-exact"
+        print(f"{objective}: self-check sample {exact}/{len(rows)} bit-exact")
 
 
 # ---------------------------------------------------------------------------

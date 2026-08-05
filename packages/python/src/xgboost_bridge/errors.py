@@ -305,6 +305,95 @@ class InterceptMismatchError(XGBoostBridgeError):
         )
 
 
+class MarginMismatchError(XGBoostBridgeError):
+    """Raised when an assembled artifact's own walk disagrees with XGBoost.
+
+    The export-time self-check FORMAT.md section 8.3 and D027 both require:
+    the exporter walks the artifact it just built and compares the result
+    against XGBoost's own ``predict(output_margin=True)`` for the same rows,
+    bit-for-bit.
+
+    Distinct from :class:`InterceptMismatchError`, which compares one number
+    -- the accumulator's initial value -- against the observed zero-tree
+    margin. This error means the *trees* disagree: a neutralization that
+    cleared a node the walk actually visits, a value read out of the wrong
+    source array, or any other defect that survives every structural check
+    and shows up only as a different number. Such a defect produces a
+    plausible margin rather than a crash, which is the failure mode this
+    library exists to prevent, so it is refused at export rather than
+    discovered by a consumer.
+
+    **What the oracle is, and why it cannot share the defect.** The oracle is
+    XGBoost's own prediction for the same input rows -- never a second walk
+    of this library's own arrays. An error in extraction, neutralization, or
+    emission cannot make both sides move together.
+
+    Attributes:
+        row_index: Index into the self-check sample of the first row that
+            disagreed.
+        derived: The margin this library's walk produced for that row.
+        observed: The margin XGBoost produced for that row.
+        mismatches: How many rows of the sample disagreed in total, so the
+            caller can tell one bad row from a wholesale disagreement.
+        rows_compared: The size of the self-check sample.
+    """
+
+    def __init__(
+        self,
+        row_index: int,
+        derived: object,
+        observed: object,
+        mismatches: int,
+        rows_compared: int,
+    ) -> None:
+        self.row_index = row_index
+        self.derived = derived
+        self.observed = observed
+        self.mismatches = mismatches
+        self.rows_compared = rows_compared
+        super().__init__(
+            f"the exported artifact's own walk disagrees with XGBoost's margin "
+            f"on {mismatches} of {rows_compared} self-check rows; first at row "
+            f"{row_index}, where the walk gives {derived!r} against XGBoost's "
+            f"{observed!r}"
+        )
+
+
+class InvalidFeatureValueError(XGBoostBridgeError):
+    """Raised when a prediction input carries a value that is not a number.
+
+    The strict-key policy of D005 compares the key set exactly; this is the
+    same refusal one level down, on the values. Coercing with Python's
+    ``float()`` would accept the string ``"nan"`` -- indistinguishable
+    afterwards from a real ``NaN``, which is this format's *missing value*
+    and routes by ``default_left``. A caller reading rows from a CSV, or from
+    a JSON producer that quotes its numbers, would get a confident wrong
+    prediction with no error. ``float()`` also accepts ``"0.5"`` and
+    ``True``, and ``True`` becoming ``1.0`` is not a feature.
+
+    A caller who genuinely means "missing" passes ``float("nan")``, which is
+    accepted. ``bool`` is refused explicitly because it is an ``int``
+    subclass and would otherwise pass the numeric test.
+
+    Attributes:
+        feature: The feature name whose value was refused.
+        value: The value found, verbatim.
+        value_type: The name of that value's type, so a caller can branch on
+            the failure without re-inspecting the value.
+        expected: A human-readable description of what is accepted.
+    """
+
+    def __init__(self, feature: str, value: object, expected: str) -> None:
+        self.feature = feature
+        self.value = value
+        self.value_type = type(value).__name__
+        self.expected = expected
+        super().__init__(
+            f"feature {feature!r} has value {value!r} of type "
+            f"{self.value_type}; expected {expected}"
+        )
+
+
 class MalformedTreeError(XGBoostBridgeError):
     """Raised when a tree's structure is not what any probe measured.
 

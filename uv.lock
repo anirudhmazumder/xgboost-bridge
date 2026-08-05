@@ -379,7 +379,7 @@ export = [
 [package.metadata]
 requires-dist = [
     { name = "numpy", specifier = ">=1.24" },
-    { name = "xgboost", marker = "extra == 'export'", specifier = ">=3.3,<4" },
+    { name = "xgboost", marker = "extra == 'export'", specifier = "==3.3.0" },
 ]
 provides-extras = ["export"]
 

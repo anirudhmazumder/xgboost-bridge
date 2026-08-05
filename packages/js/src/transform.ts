@@ -396,14 +396,30 @@ export type OutputTransformName = "identity" | "sigmoid" | "exp";
  * A lookup of anything else yields `undefined` and the reader raises: nothing
  * defaults, and no transform is inferred from the objective by analogy
  * (D007, D028).
+ *
+ * **The prototype is `null`, and that is load-bearing.** On an ordinary object
+ * literal a lookup falls through to `Object.prototype`, so
+ * `OUTPUT_FUNCTIONS["constructor"]`, `["toString"]` and `["valueOf"]` all
+ * return a function that is not a transform — and calling one returns
+ * something that serializes as the right number while failing an `Object.is`
+ * comparison against it, which is precisely the shape of wrongness this
+ * package exists to prevent. With no prototype, a miss is a miss for every
+ * key, matching the `MappingProxyType` on the Python side whose miss raises.
+ * `Object.keys`, `in`, `hasOwnProperty` and `Object.freeze` all behave as
+ * before; only inherited keys stop resolving.
  */
 export const OUTPUT_FUNCTIONS: Readonly<
   Record<OutputTransformName, (margin: number) => number>
-> = Object.freeze({
-  identity: identityF32,
-  sigmoid: sigmoidF32,
-  exp: expF32,
-});
+> = Object.freeze(
+  Object.assign(
+    Object.create(null) as Record<OutputTransformName, (margin: number) => number>,
+    {
+      identity: identityF32,
+      sigmoid: sigmoidF32,
+      exp: expF32,
+    },
+  ),
+);
 
 /** The `output_transform` names, in the order FORMAT.md §5 lists them. */
 export const OUTPUT_TRANSFORM_NAMES: readonly OutputTransformName[] = Object.freeze([

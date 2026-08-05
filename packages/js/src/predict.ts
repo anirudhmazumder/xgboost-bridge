@@ -47,7 +47,11 @@ import {
   type LoadedArtifact,
   type LoadedTree,
 } from "./artifact.js";
-import { OUTPUT_FUNCTIONS, type OutputTransformName } from "./transform.js";
+import {
+  OUTPUT_FUNCTIONS,
+  OUTPUT_TRANSFORM_NAMES,
+  type OutputTransformName,
+} from "./transform.js";
 import type { PredictionInput } from "./types.js";
 
 /**
@@ -117,7 +121,34 @@ export class Predictor {
   private readonly featureNameSet: ReadonlySet<string>;
   private readonly outputFunction: (margin: number) => number;
 
+  /**
+   * Load an already-validated artifact.
+   *
+   * `fromJSON` is the ordinary entry point and validates everything; this
+   * constructor is public, so it validates the one field it *uses*.
+   * `outputTransform` must name a transform this package implements, as an
+   * **own** property of {@link OUTPUT_FUNCTIONS}. Without that check a name
+   * such as `"constructor"` or `"valueOf"` resolved through the prototype
+   * chain and `output` returned a boxed `Number`: it serializes as the right
+   * number and arithmetic on it gives the right number, while an `Object.is`
+   * or bit-pattern comparison against it fails. A wrong number that looks
+   * right is the one outcome this package refuses to produce, so an
+   * unrecognized name throws instead.
+   *
+   * @throws {MalformedArtifactError} if `outputTransform` is not one of the
+   *   three names FORMAT.md §5 defines.
+   */
   constructor(loaded: LoadedArtifact) {
+    // Before any field is stored: an unrecognized transform means this object
+    // has no honest `output`, so it never comes into existence.
+    if (!Object.prototype.hasOwnProperty.call(OUTPUT_FUNCTIONS, loaded.outputTransform)) {
+      throw new MalformedArtifactError(
+        "output_transform",
+        loaded.outputTransform,
+        `one of: ${OUTPUT_TRANSFORM_NAMES.join(", ")}`,
+      );
+    }
+
     this.formatVersion = loaded.formatVersion;
     this.objective = loaded.objective;
     this.outputTransform = loaded.outputTransform;
@@ -126,9 +157,10 @@ export class Predictor {
     this.provenance = loaded.provenance;
     this.trees = loaded.trees;
     this.featureNameSet = new Set(loaded.featureNames);
-    // Selected once, from `output_transform`, by table lookup. After this line
-    // the transform is a function this object holds and nothing consults a
-    // name again.
+    // Selected once, from `output_transform`, by an own-property lookup the
+    // guard above has already established resolves. After this line the
+    // transform is a function this object holds and nothing consults a name
+    // again.
     this.outputFunction = OUTPUT_FUNCTIONS[loaded.outputTransform];
   }
 

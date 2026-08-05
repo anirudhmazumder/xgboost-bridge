@@ -774,3 +774,50 @@ Two `description` fields are required content rather than decoration: `objective
 **That guard then caught me.** After editing `packages/js/src/types.ts` I ran the suite without rebuilding, and 23 tests failed — the staleness refusal from D049 working as designed. A parity number measured against a stale bundle describes code that is not the source, and this is the first time the guard fired against a real mistake rather than a test.
 
 **One correction to my own earlier work.** I had reported the stale `types.ts` header comment as fixed in Phase 7. It was not: the sentence wraps across two lines and my single-line replacement silently matched nothing, because I did not assert the substitution took effect. Fixed now, with an assertion.
+
+---
+
+## D051 — Audit findings: three code defects and four packaging defects, and how an install simulation found them
+
+*2026-08-05*
+
+Three independent adversarial audits ran against a fully green build (882 Python tests, 106 Node, parity `0.0`). **None could produce a wrong number from the numerical core** — the arithmetic held on every input class attacked, including a 3.4-million-value exhaustive sweep of the sigmoid subnormal band and a 10,000-row differential fuzz over 400 generated artifacts. The defects were all at edges the tests do not reach.
+
+### The finding that mattered most, and why no test could see it
+
+**`pip install "xgboost-bridge[export]"` was broken out of the box.** The extra declared `xgboost>=3.3,<4`; xgboost 3.4.0 is released on PyPI, so a clean install resolved 3.4.0 and the *first* `export_model` call raised `UnsupportedVersionError`. Confirmed by building the wheel and installing it into a fresh virtual environment.
+
+All 882 tests passed throughout, because the `uv` workspace pins `xgboost==3.3.0`. **Every test in this repository runs against the source tree; nothing was ever tested as an installed package.** That makes an entire class of defect structurally invisible — a broken dependency spec, a file that never ships, a module that imports only because `src/` happens to be on the path.
+
+Fixed by pinning the extra to `xgboost==3.3.0`, matching the enumerated ceiling of D018 exactly. Not `<3.4`: 3.3.1 would also be untested and would also raise, so the dependency spec now equals the tested list. Widening it requires a probe — including the version-sensitive clamp constants of D032 — which is scope, not a fix.
+
+### Code defects, all fixed
+
+1. **The mandatory neutralization self-check existed nowhere.** FORMAT.md §8.3 and D027 both state it as a MUST; `export.py` never walked a tree or called `predict`. The uncovered failure is the one §8.3 names — a neutralization that clears a *live* node — and reading `base_weights` instead of `split_conditions` (off by `5.10` in margin) would also have passed everything. Aggravating: no export-level test had ever seen a tree with a dead node, because the fitting helper never set `gamma`. Now implemented, with a sample that is provably complete rather than probabilistic: one boundary row per live leaf, verified against XGBoost's own `pred_leaf`. Measured detection over **every single-live-node corruption on four models: 421 detected, 0 missed.**
+2. **`predict.py` coerced feature values with bare `float()`**, so the string `"nan"` was accepted and routed down the missing-value branch, giving a margin bit-identical to a real `NaN`. That is D005's failure mode one level down: the key set was compared exactly, then the values went to Python's most lenient constructor. A caller reading rows from CSV got a plausible prediction with no error. Now only real numbers are accepted, `bool` refused explicitly, everything else raising `InvalidFeatureValueError`.
+3. **The JavaScript `Predictor` constructor turned a prototype-chain lookup into a boxed `Number`.** `OUTPUT_FUNCTIONS` was a frozen *ordinary* object, so `outputTransform: "constructor"` resolved through `Object.prototype`, and the public constructor validated nothing. The result serialized as the right number and arithmetic on it gave the right number, but `Object.is` against it failed — exactly this project's failure signature. Now a null-prototype table plus an own-property guard, matching Python's `MappingProxyType`.
+
+### Packaging defects, all fixed
+
+- **Neither distribution shipped the licence**, while both manifests declared MIT. D050 recorded this as closed; it had been closed at the repository root only, and the wheel carried `License-Expression: MIT` with no `License-File`. Now `license-files` in the Python manifest and `LICENSE` in both package directories, verified present in a built wheel.
+- **The npm tarball shipped no README and no LICENSE** — `files: ["dist"]` excluded both, so the npm page would have rendered empty. Now 9 files including both.
+- **`packages/js/package.json` had no `repository` field**, which npm requires for `--provenance`; the publish step would have failed on that before authentication.
+
+### Measured install behaviour, both registries
+
+| | |
+|---|---|
+| Base wheel install, numpy only, no repo, no xgboost | **289/289 margin bit-exact** against XGBoost's recorded ground truth |
+| Wheel at the declared floor, Python 3.10.20 + numpy 1.24.4 | 289/289 margin bit-exact; transform max ULP unchanged at 1 and 2 |
+| `[export]` extra after the fix | resolves 3.3.0, export succeeds, margin bit-exact |
+| npm tarball, consumer project, ESM and CJS | both work; signed-zero margin `0x80000000` exact; **0** runtime dependencies pulled in |
+
+The numpy floor result matters beyond packaging: it shows the float32 discipline does **not** depend on NEP 50 promotion, despite FORMAT.md §10.1 discussing it at length.
+
+### The export self-check's cost, measured rather than assumed
+
+Completeness was kept over a bounded sample. Measured: 1000 trees at depth 6, **0.05s**; 300 trees at depth 12 over 60 features, **1.31s**. Export is a one-time offline operation, so ~1s buys a check with no probabilistic gap — which is what "loud failure over silent wrongness" and "exact over tolerant" both point at.
+
+### Findings recorded but not fixed
+
+Deliberately deferred, each with a reason: the **JSON Schema enforces roughly a third of what FORMAT.md §13 requires** (10 of 11 wrong-but-well-formed artifacts validate) — both shipped readers reject 10 and 9 of those respectively, so no wrong number reaches a consumer through them, but a third party validating against the published schema and then walking the artifact themselves is exposed. The **generators' self-checks never run in CI**, including the transform's independent mpmath oracle; the corpus was verified to regenerate byte-identically, so nothing is currently wrong, but a future divergence would not be caught. The **vocabulary scrub misses camelCase mid-identifier** (`getPatientCount`, `numPatients`, `churnRate` all slip) though its own comment claims that coverage. `dist/index.cjs` is **never executed by any test** — it works, verified by hand, but nothing would notice if it stopped. Both **`Predictor` classes are mutable at runtime** while their docstrings imply otherwise. `_version.py` and the Python manifest carry **two unlinked version literals**, so a one-sided bump would silently mislabel the provenance of every artifact from that release.

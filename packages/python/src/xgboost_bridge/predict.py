@@ -47,6 +47,12 @@ Two rules cut the other way and are just as load-bearing:
 ``default_left``; ``±inf`` is refused (D022, D045). Both behaviours belong to
 ``walk_margin`` and are deliberately not re-implemented here -- a second copy
 of a refusal is a second thing that can disagree with the first.
+
+What *is* this module's to enforce is that an input value is a number at all.
+Nothing is coerced: ``float("nan")`` is the missing value, and the string
+``"nan"`` handed to ``float()`` is indistinguishable from it afterwards, so a
+lenient constructor turns a quoted-number producer into a silent
+missing-value path (:func:`_feature_value`).
 """
 
 from __future__ import annotations
@@ -59,6 +65,7 @@ import numpy as np
 
 from .errors import (
     FeatureKeyMismatchError,
+    InvalidFeatureValueError,
     MalformedTreeError,
     UnrecognizedFieldError,
     UnsupportedObjectiveError,
@@ -276,6 +283,53 @@ def _narrow(value: object, field: str, position: int | None, location: str | Non
             field, value, f"a finite float32 value{where}", location
         )
     return narrowed
+
+
+#: What a prediction input value may be. ``numpy`` scalars are included
+#: because iterating a matrix row hands out ``np.float64`` and ``np.float32``
+#: values, which is the ordinary way a caller builds a row. ``bool`` and
+#: ``np.bool_`` are deliberately absent -- see :func:`_feature_value`.
+_FEATURE_VALUE_TYPES: Final[tuple[type, ...]] = (int, float, np.floating, np.integer)
+
+#: The description carried by :class:`InvalidFeatureValueError`. Stated once so
+#: the refusal reads the same whichever branch produced it.
+_FEATURE_VALUE_EXPECTED: Final[str] = (
+    "an int or float value (float('nan') is the missing value; a string, "
+    "a bool, or None is not a number and is not coerced)"
+)
+
+
+def _feature_value(name: str, value: object) -> float:
+    """Accept a real number for feature ``name``; refuse anything else.
+
+    This is D005's strict-key policy one level down, on the values, and it
+    exists because ``float()`` is the most lenient numeric constructor in the
+    language. ``float("nan")`` and ``float("nan")`` from the *string* ``"nan"``
+    are the same number afterwards, and ``NaN`` is this format's **missing
+    value** -- so a caller reading rows from a CSV, or from a JSON producer
+    that quotes its numbers, would get a prediction routed down
+    ``default_left`` with no error at all. That is legitimate model structure
+    repurposed by accident, which is exactly the compounding wrong number
+    D005 refuses at the key level.
+
+    ``bool`` is excluded explicitly. It is an ``int`` subclass, so it would
+    otherwise pass the numeric test, and ``True`` silently becoming ``1.0`` is
+    a coercion rather than a feature. ``np.bool_`` is not an ``np.integer``
+    and so falls to the same refusal.
+
+    An ``int`` too large for a float64 is refused rather than allowed to
+    become an infinity: ``float(10 ** 400)`` raises ``OverflowError``, which
+    carries none of the structured attributes FORMAT.md section 13 requires,
+    and silently landing on ``inf`` would collide with the refusal D045 owns.
+    """
+    if isinstance(value, bool) or not isinstance(value, _FEATURE_VALUE_TYPES):
+        raise InvalidFeatureValueError(name, value, _FEATURE_VALUE_EXPECTED)
+    try:
+        return float(value)
+    except (OverflowError, ValueError) as error:
+        raise InvalidFeatureValueError(
+            name, value, "a value representable as a float64"
+        ) from error
 
 
 def _read_intercept(artifact: Mapping[str, Any]) -> np.float32:
@@ -701,8 +755,10 @@ class Predictor:
 
         Args:
             row: A mapping whose key set equals :attr:`feature_names`
-                **exactly** -- no missing key, no extra key (D005). ``NaN`` is
-                the missing value and routes by the node's ``default_left``.
+                **exactly** -- no missing key, no extra key (D005). Each value
+                must already be an ``int`` or a ``float`` (or the ``numpy``
+                equivalent); nothing is coerced. ``float("nan")`` is the
+                missing value and routes by the node's ``default_left``.
 
         Returns:
             The margin as ``np.float32``: the accumulator of FORMAT.md section
@@ -714,6 +770,12 @@ class Predictor:
                 would turn a typo into a missing-value path, which is
                 legitimate model structure, so the mistake would become a
                 confident wrong number instead of an error.
+            :class:`~xgboost_bridge.errors.InvalidFeatureValueError`: a value
+                is not a number -- a string, a ``bool``, ``None``, a
+                container, or an ``int`` too large for a float64. Nothing is
+                coerced, because ``float("nan")`` and ``float("nan")`` from
+                the string ``"nan"`` are the same value afterwards and one of
+                them is this format's missing value.
             :class:`~xgboost_bridge.errors.NonFiniteFeatureError`: a value is
                 ``±inf`` (D022, D045). Raised by the walk, which checks the
                 whole row before visiting a node, so the outcome is a property
@@ -760,11 +822,15 @@ class Predictor:
     def _feature_row(self, row: Mapping[str, float]) -> np.ndarray:
         """Order a row's values by column index, as a strong float64 array.
 
-        Two decisions here, both deliberate:
+        Three decisions here, all deliberate:
 
         * The key set is compared for **exact** equality first, before a value
           is touched, and reports missing and extra keys together so a typo --
           which is one of each -- is diagnosed as a typo.
+        * Each value must already **be** a number; nothing is coerced. See
+          :func:`_feature_value` -- the string ``"nan"`` passed to ``float()``
+          is indistinguishable afterwards from the missing value, which is a
+          real branch of every model.
         * The array is ``dtype=np.float64``, not float32. The walk casts both
           sides of every comparison, so the result is identical either way,
           but a *pre-narrowed* row would make the walk's sample-side cast
@@ -789,5 +855,5 @@ class Predictor:
 
         values = np.empty(len(self._feature_names), dtype=np.float64)
         for index, name in enumerate(self._feature_names):
-            values[index] = float(row[name])
+            values[index] = _feature_value(name, row[name])
         return values

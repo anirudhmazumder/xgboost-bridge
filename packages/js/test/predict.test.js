@@ -18,6 +18,7 @@ import {
   Predictor,
   PredictorError,
   fromJSON,
+  loadArtifact,
 } from "../dist/index.js";
 
 const SCRATCH = new DataView(new ArrayBuffer(4));
@@ -403,6 +404,105 @@ test("output_transform alone selects the transform, for every valid pairing", ()
     assert.equal(predictor.objective, objective);
     assert.equal(predictor.outputTransform, transform);
   }
+});
+
+// ---------------------------------------------------------------------------
+// The transform lookup is own-property-only, and the constructor is public
+// ---------------------------------------------------------------------------
+
+// Every name here resolves on `Object.prototype`, so on an ordinary object
+// literal the lookup succeeded and handed back something that is not a
+// transform. `"constructor"` was the worst of them: `output` returned a boxed
+// `Number`, which serializes as the right number and does the right arithmetic
+// while failing `Object.is` and any bit-pattern comparison against it. That is
+// exactly the shape of wrongness this package exists to refuse.
+const PROTOTYPE_CHAIN_NAMES = [
+  "constructor",
+  "toString",
+  "valueOf",
+  "hasOwnProperty",
+  "__proto__",
+  "isPrototypeOf",
+  "propertyIsEnumerable",
+  "toLocaleString",
+];
+
+test("the transform table has a null prototype, so inherited names do not resolve", () => {
+  // Pins the table itself, independently of the constructor guard below: any
+  // other consumer of `OUTPUT_FUNCTIONS` gets `undefined` for these names
+  // rather than a function. This mirrors the Python side, where
+  // `OUTPUT_FUNCTIONS` is a `MappingProxyType` whose miss raises.
+  assert.equal(Object.getPrototypeOf(OUTPUT_FUNCTIONS), null);
+  for (const name of PROTOTYPE_CHAIN_NAMES) {
+    assert.equal(OUTPUT_FUNCTIONS[name], undefined, `OUTPUT_FUNCTIONS["${name}"] resolved`);
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(OUTPUT_FUNCTIONS, name),
+      false,
+      `OUTPUT_FUNCTIONS has an own "${name}"`,
+    );
+  }
+  // And the three real names are unaffected.
+  assert.deepEqual(Object.keys(OUTPUT_FUNCTIONS).sort(), ["exp", "identity", "sigmoid"]);
+  assert.ok(Object.isFrozen(OUTPUT_FUNCTIONS));
+});
+
+test("the public constructor refuses an outputTransform it does not implement", () => {
+  // Pins the guard, independently of the table's prototype: `Predictor` and its
+  // constructor are exported, and `fromJSON` is not the only door. Unlike
+  // `fromJSON` this path receives an already-loaded artifact, so the guard
+  // covers the one field the constructor actually uses.
+  const loaded = loadArtifact(WORKED_EXAMPLE);
+  for (const name of [...PROTOTYPE_CHAIN_NAMES, "softplus", "", "identity ", "IDENTITY"]) {
+    assert.throws(
+      () => new Predictor({ ...loaded, outputTransform: name }),
+      (error) => {
+        assert.ok(error instanceof MalformedArtifactError, `${name}: wrong error type`);
+        assert.equal(error.code, "MALFORMED_ARTIFACT");
+        assert.equal(error.field, "output_transform");
+        assert.equal(error.value, name);
+        return true;
+      },
+      `outputTransform "${name}" was accepted`,
+    );
+  }
+  for (const value of [undefined, null, 0, 1, {}, [], Symbol.iterator]) {
+    assert.throws(
+      () => new Predictor({ ...loaded, outputTransform: value }),
+      MalformedArtifactError,
+      `outputTransform ${String(value)} was accepted`,
+    );
+  }
+});
+
+test("the three transforms FORMAT.md §5 defines still work through the constructor", () => {
+  const loaded = loadArtifact(WORKED_EXAMPLE);
+  const row = { feature_a: 0.25, feature_b: 9.0 };
+  for (const name of ["identity", "sigmoid", "exp"]) {
+    const predictor = new Predictor({ ...loaded, outputTransform: name });
+    const margin = predictor.margin(row);
+    const output = predictor.output(row);
+    assert.equal(typeof output, "number", `${name} returned a ${typeof output}`);
+    // `Object.is`, not `==`: a boxed `Number` passes `==` against the primitive
+    // it wraps, which is how the defect read as correct.
+    assert.ok(
+      Object.is(output, OUTPUT_FUNCTIONS[name](margin)),
+      `${name} did not return the table's own value`,
+    );
+    assert.equal(bits32(output), bits32(OUTPUT_FUNCTIONS[name](margin)));
+  }
+});
+
+test("a rejected transform yields no object at all, so nothing wrong can be called", () => {
+  // The refusal happens before any field is stored: there is no half-built
+  // predictor whose `margin` works and whose `output` does not.
+  const loaded = loadArtifact(WORKED_EXAMPLE);
+  let built;
+  try {
+    built = new Predictor({ ...loaded, outputTransform: "constructor" });
+  } catch (error) {
+    assert.ok(error instanceof PredictorError);
+  }
+  assert.equal(built, undefined);
 });
 
 test("the objective is exposed for inspection and is only ever a label", () => {
