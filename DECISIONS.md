@@ -598,3 +598,26 @@ The derivation **reproduces** them bit-for-bit, because the oracle above would o
 - `probes/base_score.md` §9 step 3 states the logistic recipe with no clamp and a float64 logarithm. D035 and D040 supersede it. A reader following §9 alone reproduces the 13.8-in-margin-space defect.
 
 `SUPPORTED_OBJECTIVES` is currently defined in both `objectives.py` and `validate.py`, with a test pinning their agreement so they cannot drift silently. Collapsing them is a module-dependency question deferred rather than decided.
+
+---
+
+## D044 — Fixture ground truth is stored as float32 bit patterns
+
+*2026-08-02*
+
+Each fixture records XGBoost's expected margin and expected output as **uint32 hex bit-pattern strings** (`"0x3f800000"`), with a decimal rendering alongside for human inspection only. Consumers compare the bit patterns; the decimals are never the comparison.
+
+**Why not JSON numbers.** JSON has no representation for `±inf`, and `survival:cox` genuinely returns `+inf` above margin ≈ `88.72` — measured on 734/2500 rows of a real model. Any numeric encoding therefore needs a special case for the exact values that matter most, and a special case in the ground truth is the last place one belongs.
+
+Bit patterns handle `+inf`, `-inf`, `NaN`, and `-0.0` with no special cases at all, and they make the correct comparison the *only* convenient one. A decimal ground truth invites `==`, under which `-0.0 == 0.0` is `True` and two different artifacts compare equal.
+
+**Cost:** a fixture is less readable at a glance, which the decimal field mitigates. The decimal is explicitly non-normative: if the two ever disagree, the bit pattern is right and the fixture is regenerated.
+
+**Addendum, 2026-08-02.** Two encoding details D044 did not cover, settled by the generator:
+
+- A **missing feature value in `rows`** is JSON `null`, converted to `NaN` on read. `rows` is input, not ground truth, so the bit-pattern rule does not apply, and standard JSON has no `NaN` literal. `null` keeps every fixture parseable by a plain `JSON.parse` with no custom grammar — which matters, because the JavaScript predictor must read these files with zero dependencies.
+- A **non-finite value in the non-normative decimal fields** is the string `"inf"`, `"-inf"`, or `"nan"`. Same reason. These fields are for human inspection only; the bit pattern governs.
+
+Each fixture records the convention in `meta.nan_encoding` rather than leaving a reader to infer it.
+
+**Empirical note for anyone generating pruned models:** `tree_method="hist"` does not produce dead nodes at any `gamma`. It declines to grow a losing split rather than growing and then pruning one, so `num_deleted` stays `0`. `tree_method="exact"` is required to obtain a genuinely pruned tree, which is also what `probes/tree_structure.md` used. Discovered by measurement after several `gamma` values produced no deletions.
