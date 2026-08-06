@@ -1515,7 +1515,7 @@ def test_a_vector_leaf_model_is_refused() -> None:
 # --------------------------------------------------------------------------
 # D022: infinite feature values are refused; NaN is the missing value.
 #
-# These pin a guard that was specified in DECISIONS.md and FORMAT.md but was
+# These pin a guard that was specified in docs/DECISIONS.md and FORMAT.md but was
 # not implemented until an adversarial fixture pass noticed the gap. Before
 # the guard, walk_margin returned an ordinary float for an infinite input --
 # a plausible wrong number, which is the failure this project exists to

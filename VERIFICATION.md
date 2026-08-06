@@ -1,0 +1,137 @@
+# Verification
+
+What this library has measured, by what method, at what numbers — and, in the last section, **what it has not measured.** If you are deciding whether to trust these predictions, read that section too.
+
+Every figure here is reproducible from a clone. The commands are at the end.
+
+---
+
+## What is checked, and against what
+
+The distinction that matters most: **agreement between this library's two predictors is not evidence that either is correct.** Two implementations of the same mistake agree perfectly. So correctness is measured against oracles outside the library, and cross-language agreement is a separate check with a separate purpose.
+
+| Property | Oracle | Result |
+|---|---|---|
+| Margin correctness | **XGBoost's own `predict(output_margin=True)`** | **bit-exact, 289/289 corpus rows** |
+| Output correctness | **XGBoost's own `predict()`** | max **relative** error `9.56e-08` (bound: `1e-6`) |
+| `sigmoid` / `exp` accuracy | **`mpmath` at 50 digits**, per language independently | max **1 ULP** (`exp`), **2 ULP** (`sigmoid`) |
+| Python ↔ JavaScript agreement | each other, on bit patterns | **exactly `0.0`**, at two measurement points |
+| Artifact shape | JSON Schema, draft 2020-12 | all 23 fixtures validate |
+
+Test suites: **960** Python, **112** Node. No skipped tests, no `xfail`.
+
+---
+
+## Numerical accuracy, per objective
+
+Against XGBoost's recorded output across the whole fixture corpus:
+
+| Objective | Rows | Output bit-exact | Max relative error |
+|---|---|---|---|
+| `reg:squarederror` | 174 | **174/174** | `0.0` |
+| `binary:logistic` | 89 | 87/89 | `9.56e-08` |
+| `survival:cox` | 26 | 22/26 | `7.03e-08` |
+
+**Margins are bit-exact on all 289 rows, for every objective.**
+
+Six *output* rows differ from XGBoost in the last bit. That is expected and unavoidable: XGBoost's own `expf` is not correctly rounded, so no implementation can match it bit-for-bit at the output stage. Note where the differences fall — `reg:squarederror` uses the identity transform and differs on **nothing**, while every difference is on one of the two objectives that call the bundled `exp`. That is the pattern a correct implementation produces.
+
+Those six are pinned as an exact set of `(fixture, row)` pairs plus their count, in both languages. Movement in **either** direction fails the suite, improvements included — so the check stays a tripwire rather than becoming a tolerance band a future defect could hide inside.
+
+### Why `sigmoid` and `exp` are implemented here rather than called
+
+IEEE-754 requires correct rounding only for `+ − × ÷ √` and fused multiply-add. `exp` is not covered, and no two `libm` implementations agree: V8's differs from Apple's on **4.2%** of sigmoid and **9.6%** of `exp` evaluations, by up to 2 ULP. A library calling the platform's `exp` cannot give two languages the same answer.
+
+So both packages build the transform from the four correctly-rounded operations and exact powers of two, evaluate it under float32 semantics, and reproduce XGBoost's clamps — including the `binary:logistic` floor, which returns exactly `3.006635794144578e-39` and never `0.0`.
+
+**What this means for you:** comparing this library's probability against `scipy.special.expit`, `Math.exp`, or XGBoost's own output will show last-bit differences. That is deliberate, bounded, and the price of the two predictors agreeing exactly with each other.
+
+---
+
+## Cross-language agreement
+
+Both measurement points — the raw margin, and the final output after the transform — compared as **bit patterns**, never with `==`. (`-0.0 == 0.0` is true in both languages, and they are different values; the corpus contains a fixture whose margin is exactly `-0.0` to catch a comparison that gets this wrong.)
+
+| Corpus | Rows | Margin | Output |
+|---|---|---|---|
+| Fixture corpus | 299 | **0 mismatches** | **0 mismatches** |
+| Generated | **100,004** | **0 mismatches** | **0 mismatches** |
+
+The generated rows are adversarial rather than uniform, because uniform rows cannot find the defect that matters — **0 of 20,000 random continuous rows** detect an incorrectly-cast float32 comparison. Of the 100,004: **5,828 place a feature value exactly on a `float32` split threshold**, 112 exercise the missing-value path with `NaN`, and 654 carry a subnormal or a value beyond `1e30`. Both languages are fed identical float64 **bit patterns**, so the comparison cannot be a test of two number parsers.
+
+Sensitivity was confirmed at that scale: injecting a single ULP into one row of 100,004 produces exactly one margin mismatch.
+
+### Row counts: 289 and 299 are both correct
+
+289 is the number of corpus rows carrying XGBoost ground truth — the denominator for correctness against XGBoost. 299 adds 10 rows carrying `±inf` feature values, which deliberately have **no** ground truth, because XGBoost itself answers them two different ways (it raises through `DMatrix` and treats them as ordinary comparable values through `inplace_predict`). Those 10 still count for cross-language agreement, because agreeing on *refusing* an input is as much a property as agreeing on a value.
+
+---
+
+## What this library refuses
+
+Refusing loudly is a feature. Each refusal exists because the alternative is a plausible wrong number, and each is pinned by a fixture.
+
+| Refused | Why |
+|---|---|
+| `dart` | Only one signal distinguishes it inside a serialized model, so it cannot be detected reliably. A `dart` model with no dropout is byte-identical to `gbtree` and does export — correctly, because it *is* a tree ensemble |
+| `gblinear` | Deprecated upstream, and a separate inference path with no trees |
+| Multi-class, multi-target | An objective allow-list alone lets `reg:squarederror` with `num_target=2` through, producing two outputs per row that a scalar predictor would silently accept |
+| Categorical splits | They invert the child convention — in-set goes *right* — and their threshold slot holds a subnormal rather than a threshold |
+| Models with no feature names | A strict-key policy with no keys to check reads as enforced and is not |
+| Early-stopped models with an ambiguous tree count | The effective count is not a property of the model: the same file answers differently loaded as a `Booster` versus through the scikit-learn estimator, diverging by `1.55`, with no field distinguishing them |
+| XGBoost versions outside the tested list | Version drift here is silent — 3.4.0-dev relocated a field, and 3.3.0 reads such a model returning **0 of 400 rows correct at max error 1.26, with no warning and exit code 0** |
+| `±inf` feature values | Upstream is itself inconsistent, as above |
+| Non-finite derived intercepts | Reachable and silent: Cox at `base_score=0.0` derives `-inf`, and at any negative value `NaN`, both accepted by XGBoost without complaint |
+
+`NaN` is **not** refused. It is the missing value, and it routes by the tree's default direction.
+
+---
+
+## What is NOT verified
+
+The honest limits. Read this before relying on the numbers above in an environment unlike the one they were measured in.
+
+### Every figure above was measured on one machine
+
+**darwin/arm64** — CPython 3.12.8, numpy 2.5.1, XGBoost 3.3.0, Node 20.19.0 / 24.7.0 / 24.18.0. The installed wheel was additionally exercised at the declared floor, Python 3.10.20 with numpy 1.24.4, on that same machine.
+
+**Continuous integration has not confirmed any of it on Linux or on x86-64.** If you are running on Linux — most people are — the reasoning below is why these results are expected to hold for you, but it is reasoning, not measurement:
+
+- The float32 arithmetic is built only from `+ − × ÷` and exact powers of two, all of which IEEE-754 requires to be correctly rounded. Those cannot vary by platform.
+- The transform calls no `libm`, which is the one component that demonstrably *does* vary by platform.
+- The margin comparison against XGBoost was measured bit-stable across thread counts, batch sizes, and both prediction APIs — 1440 per-row observations, zero divergences — but on this platform only.
+
+Two things that reasoning cannot rule out: an x86-64 `libm` differing somewhere a platform function is still reached that is believed to be off the path, and XGBoost's own `expf` differing by architecture, which would move the six accepted output differences rather than the margins.
+
+**GPU was not measured at all.**
+
+### Specific gaps, named rather than glossed
+
+- The **published JSON Schema enforces roughly a third** of what the format specification requires. Ten of eleven deliberately-malformed artifacts validate against it. Both shipped predictors reject ten and nine of those respectively, so no wrong number reaches you *through them* — but if you validate against the schema and then walk the artifact yourself, it is weaker than it looks.
+- The **scikit-learn `XGBClassifier` export path is unmeasured.** The arity checks were verified against `xgboost.train` models only.
+- The **`save_best=True` early-stopping callback is unmeasured.** If it trims the model, export proceeds — which is safe, because a trimmed model is unambiguous — but that is inferred, not observed.
+- The **exact mechanism of the logistic clamp** is undecidable by measurement: an input clamp and an output floor are observationally identical, and an upper clamp is undetectable because both forms give exactly `1.0`. The constant is pinned; the mechanism is not.
+- **Two artifact refusals are impossible in JavaScript.** `format_version: 1.0` is indistinguishable from `1` after `JSON.parse`. The Python reader rejects it; the JavaScript reader cannot.
+
+### The evidence itself is committed
+
+Every empirical claim above traces to a report under [`probes/`](probes/) — 11 files recording the commands run and their actual output, including the cases where a measurement contradicted an expectation. Where something could not be established, those reports say so.
+
+---
+
+## Reproducing these numbers
+
+```bash
+uv sync                                    # Python workspace
+uv run pytest                              # 960 tests, including the parity harness
+uv run python parity/run_parity.py         # cross-language agreement, both points
+
+npm --prefix packages/js install
+npm --prefix packages/js run typecheck     # separate from the build, deliberately
+npm --prefix packages/js test              # 112 tests, against the built bundle
+
+./tools/clean_install_python.sh            # wheel contents, then install and predict
+./tools/clean_install_js.sh                # tarball contents, then install and predict
+```
+
+The two clean-install scripts build the packages, verify their contents, install them into environments containing nothing else, and predict from outside the repository. They exist because everything else in this repository tests the source tree rather than the package a user receives — and two defects reached that gap before these scripts did.

@@ -763,7 +763,7 @@ Options:  A) Refuse to export a 0-tree model -- raise. Consistent with D007; cos
 Lean:     A. A 0-tree model carries no learned structure, the state is XGBoost's own
           inconsistency rather than model content, and raising is what D007 prescribes
           for something whose meaning is not established.
-Blocks:   Artifact format design (Phase 3) -- specifically whether boost_from_average
+Blocks:   Artifact format design -- specifically whether boost_from_average
           must be carried in the artifact at all. Under A it need not be.
 ```
 
@@ -787,7 +787,7 @@ Lean:     B. The float32 logit formulation is the single most error-prone thing 
           probe found -- 16/27 values silently wrong with the obvious formula. Having it
           in one language rather than two roughly halves the exposure, and the parity
           gate then tests tree-walk arithmetic rather than re-testing a transform.
-Blocks:   Artifact format design (Phase 3). Also the JS numerical core scope: under B,
+Blocks:   Artifact format design. Also the JS numerical core scope: under B,
           JS never needs a logit at all for the intercept.
 ```
 

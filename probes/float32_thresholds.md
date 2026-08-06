@@ -693,7 +693,7 @@ bug. Verified-safe emission routes, all `0 / 341` drift:
 float64 parse to float32 is exact. What it must do is (i) narrow at parse time rather than at
 comparison time, and (ii) never emit a threshold at fewer than 9 significant digits. Both emission
 strategies above are safe; choosing between shortest-float32 text and the 17-digit float64 widening
-is a format-design question for Phase 3, not a correctness one.
+is a format-design question, not a correctness one.
 
 ---
 

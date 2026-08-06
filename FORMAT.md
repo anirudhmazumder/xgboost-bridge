@@ -2,7 +2,7 @@
 
 Normative specification for the JSON artifact produced by `xgboost-bridge` and consumed by `xgboost-predictor`.
 
-Every requirement here is traceable to measured evidence under `probes/` or to a recorded decision in `DECISIONS.md`. Where a rule exists because a plausible alternative was measured and produced wrong numbers, the measurement is cited inline. Nothing in this document is a preference.
+Every requirement here is traceable to measured evidence under `probes/` or to a recorded decision in `docs/DECISIONS.md`. Where a rule exists because a plausible alternative was measured and produced wrong numbers, the measurement is cited inline. Nothing in this document is a preference.
 
 Where this document says **MUST**, a conforming implementation that does otherwise is wrong, not merely different. There is no **SHOULD** in this specification; every rule is exact, because two implementations in two languages are written from it and must agree to exactly `0.0`.
 
@@ -147,7 +147,7 @@ Cross-language parity is checked at **both**, and both are exactly `0.0`, bit-id
 1. **The margin.**
 2. **The final output**, after the output transform.
 
-Phase 8 checks both. A margin-only parity check passes while a transform mismatch ships, which is the failure this specification exists to prevent, relocated one stage downstream.
+The parity harness checks both. A margin-only parity check passes while a transform mismatch ships, which is the failure this specification exists to prevent, relocated one stage downstream.
 
 Neither figure carries a tolerance. §5.4 is what makes the second one attainable.
 
@@ -231,7 +231,7 @@ A predictor **MUST NOT** apply `logit`, `ln`, `exp`, or any other function to th
 
 > **Why the artifact stores a derived intercept rather than `base_score` (D015).** The per-objective link space is the single largest source of silent wrongness in this project's history, and this decision removes it from the artifact entirely. `binary:logistic`'s float32 `1/p − 1` form, `survival:cox`'s `ln`, and `reg:squarederror`'s identity all collapse into this one float32 field.
 >
-> The transform is not merely delicate, it is *specifically* delicate. The textbook `log(p/(1-p))` is not equivalent: it is bit-wrong on 16 of 27 measured values and **breaches the `1e-6` margin gate** (`probes/base_score.md` §5). Independently reproduced during Phase 2 review at 100 trees: `7.63e-06` at `base_score=0.987654` and `1.91e-06` at `0.48`, against `0.0` for the correct form. Reproducing it requires the exact float32 expression, not generic float32 discipline. Implementing that once, in one language, is categorically safer than mirroring it in two.
+> The transform is not merely delicate, it is *specifically* delicate. The textbook `log(p/(1-p))` is not equivalent: it is bit-wrong on 16 of 27 measured values and **breaches the `1e-6` margin gate** (`probes/base_score.md` §5). Independently reproduced during the probe phase at 100 trees: `7.63e-06` at `base_score=0.987654` and `1.91e-06` at `0.48`, against `0.0` for the correct form. Reproducing it requires the exact float32 expression, not generic float32 discipline. Implementing that once, in one language, is categorically safer than mirroring it in two.
 
 ### 6.1 Deriving the intercept at export — the exact rule
 
@@ -280,7 +280,7 @@ Which tree-free model, exactly, depends on the case — and getting this backwar
 
 ### 6.3 Signed zero is reachable and is not normalized
 
-`intercept` can legitimately be **negative zero**, and it arrives through an ordinary default: `binary:logistic` with `base_score = 0.5` gives `-log(f32(1/0.5 − 1)) = -log(1) = -0.0`, bit pattern `0x80000000`. Verified during Phase 2 review.
+`intercept` can legitimately be **negative zero**, and it arrives through an ordinary default: `binary:logistic` with `base_score = 0.5` gives `-log(f32(1/0.5 − 1)) = -log(1) = -0.0`, bit pattern `0x80000000`. Verified during the probe phase.
 
 Consequently:
 - The exporter **MUST** emit `-0.0` as `-0.0` and **MUST NOT** normalize it to `0.0`.
@@ -460,7 +460,7 @@ OUTPUT
 
 `cast32` is `np.float32(...)` in Python and `Math.fround(...)` in JavaScript.
 
-Measured constraints, each with the cost of getting it wrong (`probes/accumulation.md` §6, and independently reproduced during Phase 2 review):
+Measured constraints, each with the cost of getting it wrong (`probes/accumulation.md` §6, and independently reproduced during the probe phase):
 
 | Rule | Measured cost of the alternative |
 |---|---|
@@ -473,7 +473,7 @@ Measured constraints, each with the cost of getting it wrong (`probes/accumulati
 
 Correct implementation: **5000/5000 bit-exact against `predict(output_margin=True)`, max abs error `0.0`**, across 3 objectives × tree counts 0–1000 × two `tree_method`s. Python-vs-JavaScript reproduced at `0.0`.
 
-> **A fixture-design trap that belongs in this specification, not only in the test suite.** At `base_score = 0.5` **every** wrong variant above scores 5000/5000, because the logistic intercept is exactly `-0.0` and intercept placement stops mattering. `survival:cox` has the same trap at its estimated default, where the intercept is exactly `0.0`. A corpus built on those values validates a broken implementation (`probes/accumulation.md` §8, and verified during Phase 2 review). Boundary values near `1.0` are required.
+> **A fixture-design trap that belongs in this specification, not only in the test suite.** At `base_score = 0.5` **every** wrong variant above scores 5000/5000, because the logistic intercept is exactly `-0.0` and intercept placement stops mattering. `survival:cox` has the same trap at its estimated default, where the intercept is exactly `0.0`. A corpus built on those values validates a broken implementation (`probes/accumulation.md` §8, and verified during the probe phase). Boundary values near `1.0` are required.
 
 ### 10.1 Verification of the two narrowing sites
 

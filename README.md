@@ -24,7 +24,7 @@ that failure mode: strict validation instead of best-effort defaults, a
 hand-rolled float32 arithmetic path instead of a platform math function that
 might round differently on a different machine, and a version ceiling that
 refuses an XGBoost build nobody has actually verified against — see
-`DECISIONS.md` for the specific measurements behind each of those choices.
+`docs/DECISIONS.md` for the specific measurements behind each of those choices.
 
 ## 1.0 scope
 
@@ -59,7 +59,7 @@ and the exact XGBoost and Node versions this has been verified against.
 ### Export a model (Python)
 
 Every code example on this page was run against a real fitted model; see
-`DECISIONS.md` for the project's take on trusting an example that wasn't.
+`docs/DECISIONS.md` for the project's take on trusting an example that wasn't.
 
 ```python
 import numpy as np
@@ -155,7 +155,7 @@ of this library, not a gap to work around:
 - **An artifact from an untested XGBoost version** raises. The supported
   list in `COMPAT.md` is versions actually probed, not a guessed range —
   an unrecognized-field check cannot catch a field that *moved* between
-  versions, which is a real, measured failure mode (see `DECISIONS.md`
+  versions, which is a real, measured failure mode (see `docs/DECISIONS.md`
   D018).
 - **A feature-key mismatch at prediction time** raises. Both predictors
   require the input's keys to match the model's feature names exactly — no
@@ -174,10 +174,13 @@ refusals, that is this library working as intended.
 ## More detail
 
 - [`FORMAT.md`](FORMAT.md) — the artifact format specification.
+- [`VERIFICATION.md`](VERIFICATION.md) — what is measured, by what method, and
+  what is **not** measured. Read the last section if you are on Linux: every
+  figure was measured on darwin/arm64 and CI has not yet confirmed them.
 - [`COMPAT.md`](COMPAT.md) — compatibility and support policy: feature-key
   strictness and what it costs you, the XGBoost and Node version boundaries,
   and what a caller should expect from the bundled numeric transform.
-- [`DECISIONS.md`](DECISIONS.md) — durable engineering decisions, the
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — durable engineering decisions, the
   evidence behind each one, and which superseded which.
 
 ## How this was built
@@ -194,6 +197,6 @@ What was done to earn it is in the repository rather than asserted here:
 - **Defects found in shipped code by review and adversarial testing are recorded, not just fixed.** Among them: a refusal that two documents specified and no code performed; a `pip install` path that resolved a version the exporter then refused; four of five float32 sites in the tree walk pinned by no test at all.
 - **The model's own mistakes are in the commit history**, including a specification example computed at the wrong precision, a statistic propagated with the wrong denominator, and an edit reported as applied that had silently matched nothing.
 
-Every decision that asserts runtime behaviour is mapped to a test that fails when the behaviour is reverted; the map is [`DECISION_COVERAGE.md`](DECISION_COVERAGE.md).
+Every decision that asserts runtime behaviour is mapped to a test that fails when the behaviour is reverted; the map is [`docs/DECISION_COVERAGE.md`](docs/DECISION_COVERAGE.md).
 
 The project's premise is that a plausible wrong number is worse than a crash. The same standard was applied to its authorship: where the model could not establish something, the repository says so.

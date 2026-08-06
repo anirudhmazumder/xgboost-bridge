@@ -3,7 +3,7 @@
 Every error this library raises -- during export, artifact parsing, or
 prediction -- is an instance of :class:`XGBoostBridgeError` or one of the
 subclasses below. Each subclass corresponds to exactly one failure mode
-named in ``CLAUDE.md`` and ``DECISIONS.md`` (see D007: fail loudly on
+named in ``CLAUDE.md`` and ``docs/DECISIONS.md`` (see D007: fail loudly on
 anything unrecognized). Nothing here defaults, guesses, or infers by
 analogy; a caller either gets a value it can act on, or an exception it can
 inspect programmatically -- never a plausible wrong number.

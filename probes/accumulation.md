@@ -898,7 +898,7 @@ Options:  A) Store base_score in its native space; both predictors compute the l
              Then the measurement in this probe IS the shipping path, already at 0.0.
 Lean:     B, and note that this probe's JS cross-check is only valid evidence for the shipping
           path under B. Under A there is an untested step.
-Blocks:   Artifact format design. Also whether a further probe is needed before Phase 3.
+Blocks:   Artifact format design. Also whether a further probe is needed before the format is fixed.
 ```
 
 ```

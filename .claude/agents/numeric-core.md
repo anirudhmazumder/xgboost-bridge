@@ -7,7 +7,7 @@ tools: Read, Grep, Glob, Bash, Write, Edit
 
 You implement the parts of this library where a wrong answer looks like a right answer.
 
-Read `CLAUDE.md` and `DECISIONS.md` before writing code. The invariants there are load-bearing.
+Read `CLAUDE.md` and `docs/DECISIONS.md` before writing code. The invariants there are load-bearing.
 
 ## Non-negotiable
 

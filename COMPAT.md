@@ -2,8 +2,8 @@
 
 This document describes what `xgboost-bridge` (PyPI) and `xgboost-predictor`
 (npm) commit to supporting, and what a caller pays for that in return. It is
-derived from the decisions recorded in `DECISIONS.md`; where this file and
-`DECISIONS.md` disagree, `DECISIONS.md` is the source of truth and this file
+derived from the decisions recorded in `docs/DECISIONS.md`; where this file and
+`docs/DECISIONS.md` disagree, `docs/DECISIONS.md` is the source of truth and this file
 has a bug.
 
 The project is pre-1.0. Everything below is subject to change before a 1.0
@@ -369,7 +369,7 @@ wrong there, the exact case a float64 transform produces. (D033)
 
 The gates above are bounds. This is what the two predictors actually
 measured against them, on all 23 corpus fixtures (289 value rows plus 10
-rows both sides are expected to refuse), as recorded in `DECISIONS.md`
+rows both sides are expected to refuse), as recorded in `docs/DECISIONS.md`
 D047–D049:
 
 - **Margin, bit-exact vs XGBoost:** **289/289** on both the Python and the

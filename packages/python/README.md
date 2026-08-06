@@ -17,7 +17,7 @@ behind every design decision live in the source repository:
 
 - [`FORMAT.md`](https://github.com/anirudhmazumder/xgboost-bridge/blob/main/FORMAT.md) — the artifact format.
 - [`COMPAT.md`](https://github.com/anirudhmazumder/xgboost-bridge/blob/main/COMPAT.md) — compatibility and support policy.
-- [`DECISIONS.md`](https://github.com/anirudhmazumder/xgboost-bridge/blob/main/DECISIONS.md) — engineering decisions and their evidence.
+- [`docs/DECISIONS.md`](https://github.com/anirudhmazumder/xgboost-bridge/blob/main/docs/DECISIONS.md) — engineering decisions and their evidence.
 
 ## 1.0 scope
 

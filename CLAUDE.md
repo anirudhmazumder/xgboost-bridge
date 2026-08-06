@@ -28,7 +28,8 @@ fixtures/                             fixture corpus + generators
 schema/                               JSON Schema for the artifact format
 probes/                               recorded empirical findings
 FORMAT.md                             artifact format specification
-DECISIONS.md                          durable decisions and rationale
+VERIFICATION.md                       what is measured, and what is not
+docs/DECISIONS.md                     durable decisions and rationale
 ```
 
 Python is a `uv` workspace with members `packages/python` and `fixtures`. JavaScript builds with `tsup`.
@@ -139,7 +140,7 @@ An objective-name allow-list alone is not enough: `reg:squarederror` with `num_t
 - **Zero JavaScript runtime dependencies.** Non-negotiable. Not "few." Zero.
 - **The version marker is the migration mechanism.** Do not reserve structural space for unimplemented features.
 
-Durable decisions and their rationale live in `DECISIONS.md`, including which decisions superseded which and on what evidence. Add to it rather than relitigating.
+Durable decisions and their rationale live in `docs/DECISIONS.md`, including which decisions superseded which and on what evidence. Add to it rather than relitigating.
 
 ## Verification gates
 

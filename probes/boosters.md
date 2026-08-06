@@ -416,7 +416,7 @@ of Signal A, not an independent detector: it cannot fire when the field is absen
 > B) Have the exporter write its own redundant marker into the `xgboost-bridge`
 >    artifact (e.g. an explicit per-tree weights array, always present, all-ones for
 >    plain gbtree). Detection becomes structural and unconditional on both sides; costs
->    an always-present array and is a Phase 3 format question.
+>    an always-present array and is a format-design question.
 > C) Refuse to export any model carrying `weight_drop` for 1.0. dart is not in the
 >    stated 1.0 scope (binary classification, regression, Cox survival). Zero silent-
 >    failure surface; costs dart support.
@@ -425,7 +425,7 @@ of Signal A, not an independent detector: it cannot fire when the field is absen
 > a dropout-weighted model raises rather than being silently mis-predicted. If dart is
 > in scope, B, because it is the only option that gives the JS reader real redundancy.
 >
-> **Blocks:** the Phase 3 artifact format's tree-weight representation, and whether the
+> **Blocks:** the artifact format's tree-weight representation, and whether the
 > exporter's booster dispatch raises or converts on `weight_drop`.
 
 ---

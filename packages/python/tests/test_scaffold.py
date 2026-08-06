@@ -1,6 +1,6 @@
 """Scaffold tests for the xgboost_bridge package.
 
-Phase 1 has no numerical core yet, so there is nothing to test about
+The scaffold has no numerical core yet, so there is nothing to test about
 predictions, thresholds, or base_score. What exists is the package's
 import surface and its error hierarchy -- this suite pins both down so
 later phases build on a foundation that is already under test. Nothing

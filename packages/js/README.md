@@ -47,7 +47,7 @@ The consequence for you: comparing this package's output against `Math.exp` or a
 
 - [Artifact format](https://github.com/anirudhmazumder/xgboost-bridge/blob/main/FORMAT.md)
 - [Compatibility and support policy](https://github.com/anirudhmazumder/xgboost-bridge/blob/main/COMPAT.md)
-- [Engineering decisions and their evidence](https://github.com/anirudhmazumder/xgboost-bridge/blob/main/DECISIONS.md)
+- [Engineering decisions and their evidence](https://github.com/anirudhmazumder/xgboost-bridge/blob/main/docs/DECISIONS.md)
 
 ## How this was built
 

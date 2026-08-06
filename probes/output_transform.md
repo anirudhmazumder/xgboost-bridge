@@ -1186,7 +1186,7 @@ Lean:     No lean on the instrument -- that is a gate design decision, not a
           and on the clamp-floor rows, because those are the two places where every
           candidate instrument returns something degenerate, and a gate that silently
           skips them is worse than no gate.
-Blocks:   Phase 6/7 output-level verification for survival:cox and for the
+Blocks:   output-level verification in both predictors, for survival:cox and for the
           binary:logistic saturation fixtures. Does NOT block the margin gate, which is
           met at exactly 0.0.
 ```

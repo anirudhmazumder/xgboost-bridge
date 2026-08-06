@@ -877,7 +877,7 @@ D008 as written — D008 governs *our* exporter's output for a *given* input mod
 does mean a fixture corpus regenerated under a different XGBoost version will not be
 byte-identical if the exporter ever carries `loss_changes`. Since `loss_changes` is not on
 the prediction path, omitting it from the artifact format removes the exposure entirely.
-That is a Phase 3 format-design observation, not a finding about correctness.
+That is a format-design observation, not a finding about correctness.
 
 ---
 

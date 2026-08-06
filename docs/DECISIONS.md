@@ -267,7 +267,7 @@ Non-finite feature values raise. Pinned by a fixture, not left to convention.
 
 *2026-08-01*
 
-An early-stopped model serializes `best_iteration` while **all** trees remain in `trees[]`. Which tree count applies is not decided here. It is measured in Phase 4 against XGBoost's own `predict()`, since fixtures carry that output as ground truth. The finding is recorded with whether it is version-dependent. If it is ambiguous, export raises.
+An early-stopped model serializes `best_iteration` while **all** trees remain in `trees[]`. Which tree count applies is not decided here. It is measured against XGBoost's own `predict()` while the exporter is built, since fixtures carry that output as ground truth. The finding is recorded with whether it is version-dependent. If it is ambiguous, export raises.
 
 **Why:** Guessing which trees XGBoost actually uses would propagate into every early-stopped artifact. This is precisely the kind of empirical question that gets measured rather than reasoned about.
 
@@ -389,7 +389,7 @@ Neither package calls a platform transcendental on the prediction path. No `Math
 
 **Consequence for the XGBoost comparison.** XGBoost transforms in C++ `libm`, so this library's probability output diverges from XGBoost's by roughly 1–2 ULP **by construction**. Expected, irrelevant at `1e-6`, and not to be read as a regression. The margin-level comparison is unaffected.
 
-This is now the most dangerous code in the repository. Phase 5's adversarial-fixture treatment applies to it in full, including D019's revert-and-confirm-red methodology.
+This is now the most dangerous code in the repository. The adversarial-fixture treatment applies to it in full, including D019's revert-and-confirm-red methodology.
 
 ---
 
@@ -710,7 +710,7 @@ The six output divergences are `libm` differences inside the bundled `exp`, expe
 
 **The transform was validated against an mpmath reference table generated in Python, not against the Python implementation.** That distinction is the whole point: agreeing with `mpmath` is evidence of correctness, whereas agreeing with the other language proves only that the same code was written twice. The table generator deliberately duplicates the exact-rounding oracle rather than importing it from the Python test suite, so the JavaScript oracle does not depend on Python test internals.
 
-**The 6 output divergences are the same 6 `(fixture, row)` pairs, with the same max relative error, as the Python side recorded in D047.** Both sides also pin them as an exact set rather than a tolerance. That is the strongest available pre-harness signal that cross-language parity is exactly `0.0`; Phase 8 confirms it formally.
+**The 6 output divergences are the same 6 `(fixture, row)` pairs, with the same max relative error, as the Python side recorded in D047.** Both sides also pin them as an exact set rather than a tolerance. That is the strongest available pre-harness signal that cross-language parity is exactly `0.0`; the parity harness confirms it formally.
 
 **The absorption pattern is mirrored between the languages, and this is worth understanding.** In JavaScript, parse-time narrowing absorbs three of the five comparison-site casts — reverting the threshold cast, the leaf cast, or the intercept cast *alone* turns zero tests red. In Python it went the other way: NEP 50 weak-scalar promotion made the *parse-time* site the absorbed one (D047). So neither language can pin all five sites, they cannot pin the same ones, and which site looks redundant is a property of the host language's promotion rules rather than of the algorithm. Both structural sites are pinned in isolation on the JavaScript side (5 and 2 tests). The absorbed casts stay, per D045's reasoning, and the asymmetry is recorded so nobody "simplifies" one language to match the other.
 
@@ -773,7 +773,7 @@ Two `description` fields are required content rather than decoration: `objective
 
 **That guard then caught me.** After editing `packages/js/src/types.ts` I ran the suite without rebuilding, and 23 tests failed — the staleness refusal from D049 working as designed. A parity number measured against a stale bundle describes code that is not the source, and this is the first time the guard fired against a real mistake rather than a test.
 
-**One correction to my own earlier work.** I had reported the stale `types.ts` header comment as fixed in Phase 7. It was not: the sentence wraps across two lines and my single-line replacement silently matched nothing, because I did not assert the substitution took effect. Fixed now, with an assertion.
+**One correction to my own earlier work.** I had reported the stale `types.ts` header comment as fixed when the JavaScript predictor landed. It was not: the sentence wraps across two lines and my single-line replacement silently matched nothing, because I did not assert the substitution took effect. Fixed now, with an assertion.
 
 ---
 

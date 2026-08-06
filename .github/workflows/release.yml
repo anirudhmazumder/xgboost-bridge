@@ -3,7 +3,7 @@ name: Release
 # CONFIGURED, NEVER EXECUTED. This file exists so the release mechanics are
 # reviewable before either package is ever published -- not because
 # publishing is imminent. No step below has been run. See COMPAT.md ("What
-# this document does not yet cover") and DECISIONS.md D012 for what is and
+# this document does not yet cover") and docs/DECISIONS.md D012 for what is and
 # is not decided about a 1.0 announcement.
 #
 # Three independent things must all be true before this workflow could

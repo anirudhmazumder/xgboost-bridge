@@ -1,7 +1,7 @@
 name: CI
 
 # Test-only workflow. There is no publish/release job here at all — nothing in
-# this file can push a package anywhere. See COMPAT.md and DECISIONS.md for
+# this file can push a package anywhere. See COMPAT.md and docs/DECISIONS.md for
 # the compatibility and release policy, and .github/workflows/release.yml
 # (configured, never executed) for the release mechanics.
 # Sequence form, deliberately. The original block used bare null-valued event

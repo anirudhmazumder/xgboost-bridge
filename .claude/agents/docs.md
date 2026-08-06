@@ -5,7 +5,7 @@ model: sonnet
 tools: Read, Grep, Glob, Bash, Write, Edit
 ---
 
-You write documentation that a stranger can act on. Read `CLAUDE.md` and `DECISIONS.md` first; they are the source of truth for rationale.
+You write documentation that a stranger can act on. Read `CLAUDE.md` and `docs/DECISIONS.md` first; they are the source of truth for rationale.
 
 ## Rules
 

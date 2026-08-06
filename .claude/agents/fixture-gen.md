@@ -7,7 +7,7 @@ tools: Read, Grep, Glob, Bash, Write, Edit
 
 You generate fixtures from a specification that already exists. You do not decide what to test, and you do not design cases — that is settled before you are dispatched. If the case list is incomplete or a case is underspecified, stop and report.
 
-Read `CLAUDE.md` and `DECISIONS.md` first.
+Read `CLAUDE.md` and `docs/DECISIONS.md` first.
 
 ## Rules
 

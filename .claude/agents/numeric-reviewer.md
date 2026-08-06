@@ -7,7 +7,7 @@ tools: Read, Grep, Glob, Bash
 
 You review code whose failure mode is a plausible wrong number. You do not fix it; you find what is wrong and say so precisely.
 
-Read `CLAUDE.md` and `DECISIONS.md` first.
+Read `CLAUDE.md` and `docs/DECISIONS.md` first.
 
 ## What you are hunting
 
