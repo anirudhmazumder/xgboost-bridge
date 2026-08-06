@@ -298,15 +298,23 @@ test("every test file imports the built bundle and never src/ (D011)", () => {
 
 test("the built bundle carries the files the export map promises", () => {
   const manifest = JSON.parse(readFileSync(path.join(PACKAGE_ROOT, "package.json"), "utf8"));
-  const promised = [
-    manifest.types,
-    manifest.main,
-    manifest.module,
-    manifest.exports["."].types,
-    manifest.exports["."].import,
-    manifest.exports["."].require,
-  ];
+  // `exports["."]` is a map of CONDITION -> either a path or a nested map, because
+  // `types` is declared per condition: a require()-mode TypeScript consumer must
+  // resolve dist/index.d.cts, not the ESM dist/index.d.ts. Walk it rather than
+  // reading fixed keys, so the test follows the map instead of one shape of it.
+  const fromExports = Object.values(manifest.exports["."]).flatMap((value) =>
+    typeof value === "string" ? [value] : Object.values(value),
+  );
+  const promised = [manifest.types, manifest.main, manifest.module, ...fromExports];
+
+  // Every declaration flavour must be reachable from the map, not merely present
+  // on disk: dist/index.d.cts shipped for weeks while nothing pointed at it, and
+  // `tsc` under node16 resolution rejected the package as a result.
+  assert.ok(fromExports.includes("./dist/index.d.ts"), "ESM types must be in the export map");
+  assert.ok(fromExports.includes("./dist/index.d.cts"), "CJS types must be in the export map");
+
   for (const relative of promised) {
+    assert.equal(typeof relative, "string", `export map yielded a non-path: ${relative}`);
     const full = path.join(PACKAGE_ROOT, relative);
     assert.ok(statSync(full).isFile(), `${relative} is promised by package.json and is missing`);
   }

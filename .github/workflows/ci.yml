@@ -4,9 +4,28 @@ name: CI
 # this file can push a package anywhere. See COMPAT.md and DECISIONS.md for
 # the compatibility and release policy, and .github/workflows/release.yml
 # (configured, never executed) for the release mechanics.
+# Triggers are spelled out with explicit branch filters rather than as bare
+# null-valued event keys. `on: {push: null}` is a common idiom and GitHub does
+# register a workflow written that way -- it registered this one, state=active --
+# but the first push to this repository produced zero workflow runs AND zero
+# check-suites, meaning the workflow was never dispatched rather than dispatched
+# and failed. The null events were the only structural difference between this
+# file and release.yml, whose single event carries a mapping, so they are removed
+# as a variable. `workflow_dispatch` is deliberate too: it is the manual escape
+# hatch, and it is the experiment that separates a workflow-file cause from an
+# account-level one, because a manual run that also produces nothing exonerates
+# this file entirely.
 on:
   push:
+    branches: ["**"]
   pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+# Least privilege: nothing here needs to write to the repository. Stated rather
+# than inherited, so a later job cannot quietly gain more.
+permissions:
+  contents: read
 
 jobs:
   python:
@@ -102,3 +121,57 @@ jobs:
       # above already produced dist/, so this deliberately does not re-run it.
       - name: Run JavaScript test suite
         run: npm run test:nobuild
+
+  # ---------------------------------------------------------------------------
+  # Clean-install jobs.
+  #
+  # Every other check in this repository runs against the source tree through the
+  # uv workspace or against packages/js/dist by relative path. Neither exercises
+  # the PACKAGE a user receives. A module that imports only because src/ is on
+  # the path, a file that never ships, an export-map condition pointing at
+  # nothing, a dependency that is really required but declared optional -- all of
+  # those pass the entire suite and fail on install. Two shipped: the export
+  # extra resolved an XGBoost version the exporter then refused, and the npm
+  # tarball carried no README or LICENCE.
+  #
+  # These are permanent jobs, not one-off checks, because a clean-install check
+  # that ran once is one that will silently rot. Both invoke the same scripts a
+  # developer runs locally, so CI cannot drift from what is reproducible by hand.
+  # ---------------------------------------------------------------------------
+  python-clean-install:
+    name: Python clean install (wheel contents, then install and predict)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install uv and Python 3.12
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          python-version: "3.12"
+
+      # Builds the wheel and sdist, asserts every runtime module and the licence
+      # are inside, installs into an environment containing nothing else, then
+      # imports and predicts from OUTSIDE the repository -- and separately
+      # installs the export extra and round-trips a real model.
+      - name: Build, verify contents, install, and predict
+        run: ./tools/clean_install_python.sh
+
+  js-clean-install:
+    name: JavaScript clean install (tarball contents, then install and predict)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+
+      # Packs the tarball, asserts every promised file is inside and that the
+      # export map resolves entirely within it, installs into an empty project,
+      # then predicts through BOTH the ESM and the CommonJS entry points and
+      # compiles a require()-mode TypeScript consumer against the package.
+      - name: Pack, verify contents, install, and predict
+        run: ./tools/clean_install_js.sh
