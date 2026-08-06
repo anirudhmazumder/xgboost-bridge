@@ -161,6 +161,100 @@ def derive_intercept(model: dict[str, Any]) -> float:
     return _emit(_link_transform(objective, base_score))
 
 
+def observe_intercept(booster: Any) -> float:
+    """Return the intercept XGBoost itself uses, observed rather than derived.
+
+    This is what the exporter ships. :func:`derive_intercept` documents how
+    the engine reaches the value and is not on the export path -- because no
+    recipe can reach it on every platform.
+
+    Args:
+        booster: The ``xgboost.Booster`` being exported.
+
+    Returns:
+        The intercept as ``float(np.float32(value))``, ready to emit under
+        FORMAT.md section 9.1. Negative zero is returned as negative zero, and
+        a non-finite value is returned rather than refused -- the refusal
+        belongs to the caller, which reports it against the source model.
+
+    Raises:
+        UnsupportedObjectiveError: The objective has no verified intercept
+            space in this version.
+        MalformedTreeError: A field this function reads is absent, is not the
+            type every probed artifact carries, or holds a value no probe has
+            observed; or the oracle model did not come back in the
+            configuration it was asked for. A broken instrument is reported as
+            such rather than returned as a number.
+
+    **Why the value is taken from the engine rather than computed (D052).**
+    XGBoost derives this intercept with the platform's ``logf``, and ``logf``
+    is not correctly rounded -- IEEE-754 requires that only for
+    ``+ - * / sqrt`` and fma. Measured on 58 inputs chosen because they
+    discriminate the candidate routes, XGBoost's own intercept differs between
+    darwin/arm64 and linux/x86_64 on **29 of them**, always by exactly 1 ULP
+    (``probes/platform_log.md``). Upstream is therefore not reproducible across
+    platforms here, which makes "bit-exact against XGBoost" and
+    "platform-independent" incompatible goals rather than a choice of recipe.
+
+    Of the two, bit-exactness wins: a 1-ULP intercept error is silent, it
+    shifts every margin the model produces, and the project's ordering says to
+    match upstream or refuse the case where divergence is silent. Reading the
+    value out of the engine satisfies that on every platform by construction.
+    The platform dependence does not reach inference -- the number is stamped
+    into the artifact, and neither predictor computes a logarithm -- so
+    cross-language parity is untouched.
+
+    **What checks this, given that the value now comes from the oracle.** Not
+    this function: comparing the engine's value against the engine's value is
+    the decorative check the independent-oracle principle warns about, so no
+    such comparison is made here. The intercept is validated end-to-end
+    instead, by ``export._verify_against_source_margin``, which requires the
+    assembled artifact to reproduce XGBoost's own ``predict`` output
+    bit-exactly on rows chosen to reach specific leaves. That oracle is
+    independent, it covers the trees and the accumulation as well as the
+    intercept, and a 1-ULP intercept error fails it. For a zero-tree model the
+    margin *is* the intercept, so that check is tautological there and is
+    documented as such rather than presented as verification -- there is no
+    derivation left to be wrong about.
+
+    Two oracle shapes, because "the same configuration" differs by tree count.
+    Both are XGBoost's observed output; only the way the zero-tree
+    configuration is reached differs:
+
+    * **Zero trees.** The booster's own margin already *is* the zero-tree
+      margin, in either ``boost_from_average`` cell. It is read directly.
+      Re-fitting instead would be wrong: passing ``base_score`` explicitly
+      flips ``boost_from_average`` to ``"0"`` and the oracle would come back
+      in link space for a model whose margin is the raw value.
+    * **Trees present.** A fresh model is fitted with zero boosting rounds and
+      the same objective, with ``base_score`` passed **explicitly** at the
+      source model's stored value. Explicit is mandatory: left at its default,
+      ``boost_from_average`` stays ``"1"`` and the oracle returns the raw
+      value instead of the transform.
+
+    The refit is deterministic -- there are no boosting rounds to vary. 15
+    repeats across 8 configurations gave one distinct bit pattern each, stable
+    across separate interpreters, so export determinism is unaffected.
+    """
+    document = json.loads(booster.save_raw(raw_format="json"))
+    learner = _required(document, "learner", None)
+    objective = _objective_name(learner)
+    model_param = _required(learner, "learner_model_param", "learner")
+    base_score = _read_base_score(model_param)
+    # Read for its structural validation: an unrecognised boost_from_average is
+    # a model this version has not measured, and that is true whether or not
+    # this particular function branches on the value.
+    _read_boost_from_average(model_param)
+    tree_count = len(_read_trees(learner))
+
+    if tree_count == 0:
+        observed = _observed_margin(booster, learner)
+    else:
+        observed = _observed_zero_round_margin(objective, base_score)
+
+    return _emit(observed)
+
+
 def verify_intercept(booster: Any, derived: float) -> None:
     """Raise unless ``derived`` matches XGBoost's own zero-tree margin.
 

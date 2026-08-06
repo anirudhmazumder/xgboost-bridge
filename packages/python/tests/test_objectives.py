@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -355,42 +356,134 @@ def test_supported_objectives_agree_with_the_export_gate() -> None:
 # --------------------------------------------------------------------------
 
 
-def _sweep_report(objective: str, values: tuple[float, ...]) -> tuple[int, list[str]]:
+def ulp_distance(left: np.float32, right: np.float32) -> int:
+    """Float32 steps between two finite values, across the sign boundary.
+
+    Monotonic ordering of a sign-magnitude format: the negative half is
+    reflected so that adjacent floats are always one apart, including the pair
+    straddling zero.
+    """
+
+    def ordered(value: np.float32) -> int:
+        pattern = bits32(value)
+        return -(pattern & 0x7FFFFFFF) if pattern & 0x80000000 else pattern
+
+    return abs(ordered(left) - ordered(right))
+
+
+def _sweep_report(
+    objective: str,
+    values: tuple[float, ...],
+    producer: Callable[[Any, dict[str, Any]], float],
+) -> tuple[int, int, list[str]]:
+    """Compare a producer's intercept against XGBoost's observed margin.
+
+    Returns the bit-exact count, the worst ULP distance, and a report line for
+    every value that was not bit-exact.
+    """
     hits = 0
+    worst = 0
     failures: list[str] = []
     for base_score in values:
-        _booster, document, observed = zero_tree_oracle(objective, base_score)
-        derived = objectives.derive_intercept(document)
-        if bits32(derived) == bits32(observed):
+        booster, document, observed = zero_tree_oracle(objective, base_score)
+        got = producer(booster, document)
+        if bits32(got) == bits32(observed):
             hits += 1
         else:
+            worst = max(worst, ulp_distance(np.float32(got), observed))
             failures.append(
-                f"base_score={base_score!r}: derived {derived!r} "
-                f"bits=0x{bits32(derived):08X} vs XGBoost {float(observed)!r} "
+                f"base_score={base_score!r}: got {got!r} "
+                f"bits=0x{bits32(got):08X} vs XGBoost {float(observed)!r} "
                 f"bits=0x{bits32(observed):08X}"
             )
-    return hits, failures
+    return hits, worst, failures
+
+
+def _shipped(booster: Any, _document: dict[str, Any]) -> float:
+    """What export actually puts in the artifact."""
+    return objectives.observe_intercept(booster)
+
+
+def _recipe(_booster: Any, document: dict[str, Any]) -> float:
+    """The documented derivation, which is no longer on the export path."""
+    return objectives.derive_intercept(document)
+
+
+# --- what ships: exact against the engine, on every platform ----------------
+#
+# These are the gate. The value the exporter emits must be XGBoost's own, and
+# `observe_intercept` reaching it through the production code path is checked
+# against a test-local prediction here -- two independent readings of the
+# oracle, which is what catches a wrong space or a wrong boost_from_average
+# cell rather than a wrong logarithm.
 
 
 def test_logistic_intercept_is_bit_exact_against_xgboost() -> None:
     total = len(LOGISTIC_SWEEP)
     assert total >= 40
-    hits, failures = _sweep_report("binary:logistic", LOGISTIC_SWEEP)
+    hits, _worst, failures = _sweep_report("binary:logistic", LOGISTIC_SWEEP, _shipped)
     assert hits == total, f"binary:logistic {hits}/{total}\n" + "\n".join(failures)
 
 
 def test_cox_intercept_is_bit_exact_against_xgboost() -> None:
     total = len(COX_SWEEP)
     assert total >= 40
-    hits, failures = _sweep_report("survival:cox", COX_SWEEP)
+    hits, _worst, failures = _sweep_report("survival:cox", COX_SWEEP, _shipped)
     assert hits == total, f"survival:cox {hits}/{total}\n" + "\n".join(failures)
 
 
 def test_regression_intercept_is_bit_exact_against_xgboost() -> None:
     total = len(REGRESSION_SWEEP)
     assert total >= 40
-    hits, failures = _sweep_report("reg:squarederror", REGRESSION_SWEEP)
+    hits, _worst, failures = _sweep_report(
+        "reg:squarederror", REGRESSION_SWEEP, _shipped
+    )
     assert hits == total, f"reg:squarederror {hits}/{total}\n" + "\n".join(failures)
+
+
+# --- the documented recipe: exact where no logarithm runs, 1 ULP where one does
+
+
+def test_regression_recipe_is_exact_because_no_logarithm_runs() -> None:
+    """``reg:squarederror`` takes the identity link, so the recipe reaches the
+    engine's value with no transcendental in the way. It is bit-exact on every
+    platform, and that is the control which localises the platform dependence
+    below to the logarithm rather than to anything else in the derivation."""
+    total = len(REGRESSION_SWEEP)
+    hits, _worst, failures = _sweep_report(
+        "reg:squarederror", REGRESSION_SWEEP, _recipe
+    )
+    assert hits == total, f"reg:squarederror {hits}/{total}\n" + "\n".join(failures)
+
+
+@pytest.mark.parametrize(
+    ("objective", "values"),
+    [("binary:logistic", LOGISTIC_SWEEP), ("survival:cox", COX_SWEEP)],
+)
+def test_recipe_agrees_with_the_engine_to_within_one_ulp(
+    objective: str, values: tuple[float, ...]
+) -> None:
+    """The two log objectives derive the intercept through ``logf``, and
+    ``logf`` is not correctly rounded -- IEEE-754 requires that only for
+    ``+ - * / sqrt`` and fma. XGBoost's own answer therefore differs between
+    darwin/arm64 and linux/x86_64 by 1 ULP on 29 of 58 discriminating inputs
+    (``probes/platform_log.md``, D052), so no recipe is bit-exact everywhere
+    and requiring it here would mean the suite could only pass on one platform.
+
+    What is asserted instead is the bound: the recipe never misses the engine
+    by more than a single float32 step. A larger gap means a real defect --
+    the wrong space, a missing clamp, an unsnapped ``base_score`` -- and this
+    still fails on all of those. The shipped intercept is not affected either
+    way: export reads it out of the engine (``_shipped`` above)."""
+    hits, worst, failures = _sweep_report(objective, values, _recipe)
+    assert worst <= 1, (
+        f"{objective}: recipe is {worst} ULP from the engine, expected at most 1\n"
+        + "\n".join(failures)
+    )
+    # Report rather than pin: which values disagree is a property of this
+    # machine's libm, and pinning a count here is what made 18 tests
+    # darwin-only in the first place.
+    print(f"{objective}: recipe bit-exact on {hits}/{len(values)}, worst {worst} ULP")
 
 
 def test_intercept_is_exactly_representable_as_float32() -> None:
@@ -438,12 +531,18 @@ def test_logistic_clamp_is_load_bearing(
     """Skipping the clamp gives a plausible wrong intercept, by up to 13.8
     in margin space. XGBoost clamps before deriving and stores the value
     unclamped, so the clamp cannot be recovered from the artifact (D035)."""
-    _booster, document, observed = zero_tree_oracle("binary:logistic", base_score)
+    booster, document, observed = zero_tree_oracle("binary:logistic", base_score)
     derived = objectives.derive_intercept(document)
     unclamped = _unclamped_logistic(base_score)
 
-    assert bits32(derived) == bits32(observed)
-    assert bits32(unclamped) == bits32(expected_unclamped), (
+    assert bits32(objectives.observe_intercept(booster)) == bits32(observed)
+    assert ulp_distance(np.float32(derived), observed) <= 1
+    # A 1-ULP canary rather than bit equality: this literal was recorded on
+    # darwin/arm64 and `_unclamped_logistic` calls the platform's logarithm.
+    # The claim being pinned is the margin-space error below, which is over
+    # 2.0 -- a last-bit difference in a value of magnitude 16 cannot touch it,
+    # while a real change to the recipe moves it far more than one step.
+    assert ulp_distance(unclamped, np.float32(expected_unclamped)) <= 1, (
         f"the unclamped recipe moved: {float(unclamped)!r}"
     )
     assert bits32(unclamped) != bits32(observed), (
@@ -461,15 +560,37 @@ def test_logistic_clamp_saturates_to_the_pinned_bounds() -> None:
     saturated_low = -13.815509796142578
     saturated_high = 13.745160102844238
 
-    for base_score in (0.0, 1.401298464324817e-45, 1e-38, 1e-12, 1e-7):
-        _booster, document, observed = zero_tree_oracle("binary:logistic", base_score)
-        assert bits32(objectives.derive_intercept(document)) == bits32(saturated_low)
-        assert bits32(observed) == bits32(saturated_low)
-
-    for base_score in (0.999998927116394, 0.9999999, 1.0):
-        _booster, document, observed = zero_tree_oracle("binary:logistic", base_score)
-        assert bits32(objectives.derive_intercept(document)) == bits32(saturated_high)
-        assert bits32(observed) == bits32(saturated_high)
+    # Saturation is the claim, and it is stated as agreement *within* each
+    # group rather than against a recorded literal. Every value past the
+    # transition must reach one and the same intercept -- exactly, on any
+    # platform -- and the literal is then a 1-ULP canary, because the bound
+    # itself is reached through the platform's logarithm (D052).
+    for values, recorded in (
+        ((0.0, 1.401298464324817e-45, 1e-38, 1e-12, 1e-7), saturated_low),
+        ((0.999998927116394, 0.9999999, 1.0), saturated_high),
+    ):
+        shipped: set[int] = set()
+        derived: set[int] = set()
+        for base_score in values:
+            booster, document, observed = zero_tree_oracle(
+                "binary:logistic", base_score
+            )
+            shipped.add(bits32(objectives.observe_intercept(booster)))
+            derived.add(bits32(objectives.derive_intercept(document)))
+            assert bits32(observed) in shipped
+        assert len(shipped) == 1, (
+            f"{values!r} did not saturate to a single intercept: "
+            f"{[hex(v) for v in sorted(shipped)]}"
+        )
+        assert len(derived) == 1, (
+            f"the recipe did not saturate across {values!r}: "
+            f"{[hex(v) for v in sorted(derived)]}"
+        )
+        saturated = np.uint32(next(iter(shipped))).view(np.float32)
+        assert ulp_distance(saturated, np.float32(recorded)) <= 1, (
+            f"the saturated intercept moved: {float(saturated)!r} vs "
+            f"recorded {recorded!r}"
+        )
 
 
 def test_logistic_clamp_keeps_the_logarithm_in_its_domain_at_one() -> None:
@@ -477,7 +598,7 @@ def test_logistic_clamp_keeps_the_logarithm_in_its_domain_at_one() -> None:
     unclamped argument there is exactly ``0.0``, where a float64 logarithm
     raises ``math domain error`` outright rather than producing a wrong
     number -- so this input separates the clamp from the transform."""
-    _booster, document, observed = zero_tree_oracle("binary:logistic", 1.0)
+    booster, document, observed = zero_tree_oracle("binary:logistic", 1.0)
     assert document["learner"]["learner_model_param"]["base_score"] == "[1E0]"
 
     unclamped_argument = np.float32(np.float32(np.float32(1.0) / np.float32(1.0)) - 1.0)
@@ -485,8 +606,12 @@ def test_logistic_clamp_keeps_the_logarithm_in_its_domain_at_one() -> None:
     with pytest.raises(ValueError, match="math domain error"):
         math.log(float(unclamped_argument))
 
-    assert bits32(objectives.derive_intercept(document)) == bits32(observed)
-    assert bits32(observed) == bits32(13.745160102844238)
+    assert bits32(objectives.observe_intercept(booster)) == bits32(observed)
+    assert ulp_distance(np.float32(objectives.derive_intercept(document)), observed) <= 1
+    # 1-ULP canary on the recorded value: the clamp bound's logarithm comes from
+    # the platform's libm (D052). What this test pins is that the argument is
+    # exactly 0.0 without the clamp, which is exact everywhere.
+    assert ulp_distance(observed, np.float32(13.745160102844238)) <= 1
 
 
 def _clamped_to_logistic_bounds(base_score: float) -> np.float32:
@@ -506,12 +631,15 @@ def test_cox_is_not_clamped(base_score: float) -> None:
     """Reusing the logistic bounds here would be inference by analogy, and it
     is wrong on 27 of 34 measured Cox values. Every value below is outside
     the logistic window, so the two hypotheses must disagree."""
-    _booster, document, observed = zero_tree_oracle("survival:cox", base_score)
+    booster, document, observed = zero_tree_oracle("survival:cox", base_score)
     derived = objectives.derive_intercept(document)
     wrongly_clamped = np.float32(np.log(_clamped_to_logistic_bounds(base_score)))
 
-    assert bits32(derived) == bits32(observed)
-    assert bits32(wrongly_clamped) != bits32(observed)
+    assert bits32(objectives.observe_intercept(booster)) == bits32(observed)
+    assert ulp_distance(np.float32(derived), observed) <= 1
+    # Not a last-bit question: applying the logistic window here moves the
+    # intercept by whole units, because every value above is outside it.
+    assert ulp_distance(wrongly_clamped, observed) > 1
 
 
 @pytest.mark.parametrize("base_score", [-1e38, -1.0, 1e-38, 1.5, 1e30])
@@ -533,72 +661,129 @@ def test_regression_is_not_clamped(base_score: float) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_cox_float32_log_route_matches_xgboost_where_float64_does_not() -> None:
-    """On the inputs where the two routes disagree, only the float32 route
-    matches XGBoost. An ordinary sweep cannot see this -- the routes agree
-    on 99.945% of float32 inputs (D040)."""
-    total = len(COX_LOG_ROUTE_DISAGREEMENTS)
-    float32_route_hits = 0
-    float64_route_hits = 0
+def _log_route_candidates(
+    objective: str, base_score: float
+) -> tuple[np.float32, np.float32]:
+    """The two recipes ever proposed for this intercept, on one input.
+
+    Both narrow to float32 first; they differ only in the space the logarithm
+    itself is evaluated in.
+    """
+    snapped = np.float32(base_score)
+    if objective == "survival:cox":
+        argument, sign = snapped, np.float32(1.0)
+    else:
+        argument = np.float32(np.float32(np.float32(1.0) / snapped) - np.float32(1.0))
+        sign = np.float32(-1.0)
+    return (
+        np.float32(sign * np.float32(np.log(argument))),
+        np.float32(sign * np.float32(math.log(float(argument)))),
+    )
+
+
+@pytest.mark.parametrize(
+    ("objective", "values"),
+    [
+        ("survival:cox", COX_LOG_ROUTE_DISAGREEMENTS),
+        ("binary:logistic", LOGISTIC_LOG_ROUTE_DISAGREEMENTS),
+    ],
+)
+def test_no_fixed_log_recipe_reproduces_the_engine_on_every_platform(
+    objective: str, values: tuple[float, ...]
+) -> None:
+    """Why the intercept is read out of the engine instead of computed (D052).
+
+    These inputs were chosen because the candidate recipes disagree on them.
+    An ordinary sweep cannot see any of this -- the routes agree on 99.945% of
+    float32 inputs, and two earlier sweeps of 79 and 1432 values both concluded
+    "no difference" (D040).
+
+    The superseded version of this test asserted that the float32 route matches
+    XGBoost on *all* of these and the float64 route on *none*. That held on
+    darwin/arm64 and was false on linux/x86_64, where it was 13 of the 18 first
+    CI failures: XGBoost calls the platform's ``logf``, ``logf`` is not
+    correctly rounded, and XGBoost's own intercept differs between the two
+    platforms by 1 ULP on 29 of 58 discriminating inputs
+    (``probes/platform_log.md``). The old assertion was a true statement about
+    one libm mistaken for a statement about XGBoost.
+
+    Three things are asserted instead, each of which held on both platforms:
+
+    1. What the exporter ships is the engine's own value, on every input.
+    2. These inputs still discriminate the two candidate recipes somewhere, so
+       the case has not quietly stopped being interesting.
+    3. At least one candidate recipe misses the engine -- which is the whole
+       reason neither is on the export path.
+    """
+    shipped_exact = 0
+    discriminating = 0
+    float32_route_misses = 0
+    float64_route_misses = 0
     rows: list[str] = []
 
-    for base_score in COX_LOG_ROUTE_DISAGREEMENTS:
-        snapped = np.float32(base_score)
-        route_float32 = np.float32(np.log(snapped))
-        route_float64 = np.float32(math.log(float(snapped)))
-        assert bits32(route_float32) != bits32(route_float64), (
-            f"{base_score!r} no longer discriminates the two log routes"
+    for base_score in values:
+        booster, _document, observed = zero_tree_oracle(objective, base_score)
+        route_float32, route_float64 = _log_route_candidates(objective, base_score)
+        discriminating += bits32(route_float32) != bits32(route_float64)
+        float32_route_misses += bits32(route_float32) != bits32(observed)
+        float64_route_misses += bits32(route_float64) != bits32(observed)
+        shipped_exact += bits32(objectives.observe_intercept(booster)) == bits32(
+            observed
         )
-
-        _booster, document, observed = zero_tree_oracle("survival:cox", base_score)
-        derived = objectives.derive_intercept(document)
-        assert bits32(derived) == bits32(route_float32), (
-            "derive_intercept is not taking the float32 route"
-        )
-        float32_route_hits += bits32(route_float32) == bits32(observed)
-        float64_route_hits += bits32(route_float64) == bits32(observed)
         rows.append(
             f"{base_score!r}: xgb=0x{bits32(observed):08X} "
             f"f32=0x{bits32(route_float32):08X} f64=0x{bits32(route_float64):08X}"
         )
 
-    assert float32_route_hits == total, "\n".join(rows)
-    assert float64_route_hits == 0, "\n".join(rows)
+    report = "\n".join(rows)
+    total = len(values)
+    assert shipped_exact == total, (
+        f"{objective}: the shipped intercept matched the engine on only "
+        f"{shipped_exact}/{total}\n{report}"
+    )
+    assert discriminating >= 1, (
+        f"{objective}: none of these {total} inputs discriminates the two log "
+        f"routes any more, so this test no longer tests anything\n{report}"
+    )
+    assert float32_route_misses + float64_route_misses >= 1, (
+        f"{objective}: both candidate recipes reproduced the engine on all "
+        f"{total} inputs, which would mean a fixed recipe is viable after all "
+        f"and D052 needs revisiting\n{report}"
+    )
 
 
-def test_logistic_float32_log_route_matches_xgboost_where_float64_does_not() -> None:
-    """Same discrimination for the logistic transform. The disagreeing
-    inputs cluster near ``base_score = 0.5``, where the intercept's
-    magnitude is small; a sweep of the clamp window that misses that
-    neighbourhood reports "no difference" and proves nothing."""
-    total = len(LOGISTIC_LOG_ROUTE_DISAGREEMENTS)
-    float32_route_hits = 0
-    float64_route_hits = 0
-    rows: list[str] = []
+def test_derive_intercept_still_takes_the_float32_log_route() -> None:
+    """The recipe's own shape, asserted without reference to any engine.
 
-    for base_score in LOGISTIC_LOG_ROUTE_DISAGREEMENTS:
-        snapped = np.float32(base_score)
-        odds = np.float32(np.float32(np.float32(1.0) / snapped) - np.float32(1.0))
-        route_float32 = np.float32(-np.log(odds))
-        route_float64 = np.float32(-math.log(float(odds)))
-        assert bits32(route_float32) != bits32(route_float64), (
-            f"{base_score!r} no longer discriminates the two log routes"
+    ``derive_intercept`` must evaluate its logarithm in float32 rather than
+    computing in float64 and narrowing once. That is a property of this
+    codebase, so it is checked against this codebase's own two candidate
+    routes -- both sides run on the same libm, so the comparison is exact on
+    every platform. Pinning it against XGBoost instead is what made the
+    superseded version darwin-only.
+    """
+    for objective, values in (
+        ("survival:cox", COX_LOG_ROUTE_DISAGREEMENTS),
+        ("binary:logistic", LOGISTIC_LOG_ROUTE_DISAGREEMENTS),
+    ):
+        checked = 0
+        for base_score in values:
+            route_float32, route_float64 = _log_route_candidates(objective, base_score)
+            if bits32(route_float32) == bits32(route_float64):
+                continue  # this input cannot discriminate on this platform
+            _booster, document, _observed = zero_tree_oracle(objective, base_score)
+            derived = objectives.derive_intercept(document)
+            assert bits32(derived) == bits32(route_float32), (
+                f"{objective} at {base_score!r}: derive_intercept is not taking "
+                f"the float32 log route -- got 0x{bits32(derived):08X}, "
+                f"float32 route 0x{bits32(route_float32):08X}, "
+                f"float64 route 0x{bits32(route_float64):08X}"
+            )
+            checked += 1
+        assert checked >= 1, (
+            f"{objective}: no input discriminated the routes, so this test "
+            f"asserted nothing"
         )
-
-        _booster, document, observed = zero_tree_oracle("binary:logistic", base_score)
-        derived = objectives.derive_intercept(document)
-        assert bits32(derived) == bits32(route_float32), (
-            "derive_intercept is not taking the float32 route"
-        )
-        float32_route_hits += bits32(route_float32) == bits32(observed)
-        float64_route_hits += bits32(route_float64) == bits32(observed)
-        rows.append(
-            f"{base_score!r}: xgb=0x{bits32(observed):08X} "
-            f"f32=0x{bits32(route_float32):08X} f64=0x{bits32(route_float64):08X}"
-        )
-
-    assert float32_route_hits == total, "\n".join(rows)
-    assert float64_route_hits == 0, "\n".join(rows)
 
 
 def test_textbook_logit_is_not_the_logistic_transform() -> None:
@@ -614,9 +799,12 @@ def test_textbook_logit_is_not_the_logistic_transform() -> None:
     right: list[float] = []
     worst = 0.0
     for base_score in sweep:
-        _booster, document, observed = zero_tree_oracle("binary:logistic", base_score)
-        derived = objectives.derive_intercept(document)
-        assert bits32(derived) == bits32(observed)
+        booster, document, observed = zero_tree_oracle("binary:logistic", base_score)
+        assert bits32(objectives.observe_intercept(booster)) == bits32(observed)
+        assert (
+            ulp_distance(np.float32(objectives.derive_intercept(document)), observed)
+            <= 1
+        )
 
         probability = np.float32(base_score)
         textbook = np.float32(
@@ -627,23 +815,58 @@ def test_textbook_logit_is_not_the_logistic_transform() -> None:
         else:
             worst = max(worst, abs(float(textbook) - float(observed)))
 
-    assert right == [0.7], f"the textbook formula was right on {right}"
+    # *Which* values the textbook formula happens to get right depends on the
+    # platform's libm, so the list is reported rather than pinned -- pinning it
+    # to [0.7] is what made this test darwin-only (D052). What is asserted is
+    # the failure signature itself: right on some inputs, wrong on others, no
+    # error raised anywhere, and an error large enough to breach the gate.
+    print(f"textbook formula was bit-exact on {right}")
+    assert len(right) < len(sweep), (
+        "the textbook formula reproduced XGBoost on every value, which would "
+        "mean it is the transform after all and D033 needs revisiting"
+    )
     assert worst > 1e-6, f"worst textbook error {worst!r} does not breach the gate"
 
 
-def test_base_score_is_snapped_to_float32_before_the_transform() -> None:
+@pytest.mark.parametrize("base_score", [0.99, 0.999, 0.999999])
+def test_base_score_is_snapped_to_float32_before_the_transform(
+    base_score: float,
+) -> None:
     """``float("[4.8E-1]"[1:-1])`` is ``0.48``; the value XGBoost holds is
-    ``0.47999998927116394``. Deriving from the unsnapped float64 is 1 ULP
-    wrong for Cox and 20 ULP wrong for logistic."""
-    _booster, document, observed = zero_tree_oracle("survival:cox", 0.7)
-    assert document["learner"]["learner_model_param"]["base_score"] == "[7E-1]"
-    derived = objectives.derive_intercept(document)
-    unsnapped = np.float32(np.log(np.float64(0.7)))
+    ``0.47999998927116394``. Taking the logarithm of the unsnapped float64
+    instead is a different number.
 
-    assert bits32(derived) == bits32(observed)
-    assert bits32(derived) == bits32(-0.3566749691963196)
-    assert bits32(unsnapped) == bits32(-0.3566749393939972)
-    assert bits32(unsnapped) != bits32(observed)
+    The values here are close to 1, where the logarithm's own ULP is tiny while
+    the float64-to-float32 input gap is not, so the two routes separate by 10,
+    110 and 116804 ULP respectively. The superseded version used ``0.7``, where
+    they separate by exactly 1 -- a true measurement that a 1-ULP difference in
+    the platform's ``logf`` erases completely, and it duly failed on
+    linux/x86_64 while passing on darwin/arm64 (D052). A claim worth pinning
+    should be pinned where it is not a last-bit coincidence.
+    """
+    booster, document, observed = zero_tree_oracle("survival:cox", base_score)
+    # The artifact carries a decimal. Parsed as float64 it is one number; the
+    # value XGBoost actually holds is that number narrowed to float32, and the
+    # two have different logarithms. Narrowing first is the whole point, so the
+    # unsnapped route must keep the float64 -- taking float() of the *narrowed*
+    # value instead recovers the float32 exactly and erases the distinction.
+    as_float64 = float(
+        document["learner"]["learner_model_param"]["base_score"].strip("[]")
+    )
+    snapped_route = np.float32(np.log(np.float32(as_float64)))
+    unsnapped_route = np.float32(np.log(np.float64(as_float64)))
+
+    separation = ulp_distance(snapped_route, unsnapped_route)
+    assert separation > 1, (
+        f"base_score={base_score!r} separates the snapped and unsnapped routes "
+        f"by only {separation} ULP, so it cannot pin the snapping"
+    )
+    assert bits32(objectives.observe_intercept(booster)) == bits32(observed)
+    assert ulp_distance(np.float32(objectives.derive_intercept(document)), observed) <= 1
+    assert ulp_distance(unsnapped_route, observed) > 1, (
+        "the unsnapped route reached XGBoost's value, so the snapping is not "
+        "pinned by this input"
+    )
 
 
 def test_logistic_derives_from_the_snapped_value_too() -> None:
@@ -792,17 +1015,27 @@ def test_regression_preserves_a_stored_negative_zero() -> None:
 
 
 @pytest.mark.parametrize(
-    ("base_score", "expected_bits"),
-    [(0.0, 0xFF800000), (-0.5, 0x7FC00000), (-1e-06, 0x7FC00000)],
+    ("base_score", "expected"),
+    [(0.0, 0xFF800000), (-0.5, "nan"), (-1e-06, "nan")],
 )
 def test_cox_reproduces_xgboost_non_finite_intercepts(
-    base_score: float, expected_bits: int
+    base_score: float, expected: int | str
 ) -> None:
     """``survival:cox`` accepts ``base_score <= 0`` with no error and no
-    warning, giving ``-inf`` at zero and ``NaN`` below it. The derivation
-    reproduces XGBoost rather than second-guessing it; whether such an
-    intercept may be *emitted* is a format question (FORMAT.md sections 6,
-    9.3) and is not decided here."""
+    warning, giving ``-inf`` at zero and ``NaN`` below it. Both paths reproduce
+    XGBoost rather than second-guessing it; whether such an intercept may be
+    *emitted* is a format question (FORMAT.md sections 6, 9.3), and the refusal
+    is asserted at the end.
+
+    ``-inf`` is pinned as an exact bit pattern because which infinity it is
+    carries meaning. The ``NaN`` cases are pinned as a class instead: XGBoost
+    returns ``0x7FC00000`` on darwin/arm64 and ``0xFFC00000`` on linux/x86_64,
+    and IEEE-754 leaves the sign of a NaN from ``log`` of a negative number
+    unspecified, so the sign bit is not a behaviour to pin. The superseded
+    version pinned it and was 2 of the 18 first Linux failures (D052). What
+    matters here is that the value is not finite and is therefore refused,
+    which holds on both platforms.
+    """
     booster, document = fit("survival:cox", base_score=base_score, rounds=0)
     model_param = document["learner"]["learner_model_param"]
     assert model_param["boost_from_average"] == "0"
@@ -810,11 +1043,29 @@ def test_cox_reproduces_xgboost_non_finite_intercepts(
     margin = np.asarray(
         booster.predict(_matrix("survival:cox"), output_margin=True), dtype=np.float32
     )
-    patterns = set(margin.view(np.uint32).tolist())
-    assert patterns == {expected_bits}, f"XGBoost margin bits {sorted(patterns)}"
-
     derived = objectives.derive_intercept(document)
-    assert bits32(derived) == expected_bits
+    shipped = objectives.observe_intercept(booster)
+
+    if expected == "nan":
+        patterns = set(margin.view(np.uint32).tolist())
+        assert all(np.isnan(margin)), f"XGBoost margin bits {sorted(patterns)}"
+        # Quiet, not signalling: exponent all ones and the mantissa's high bit
+        # set. That much IEEE-754 does specify, and it is what distinguishes a
+        # NaN XGBoost produced from a corrupted read.
+        for pattern in patterns:
+            assert pattern & 0x7FFFFFFF == 0x7FC00000, f"not a quiet NaN: {pattern:#x}"
+        assert math.isnan(derived), f"the recipe gave {derived!r}"
+        assert math.isnan(shipped), f"the shipped path gave {shipped!r}"
+    else:
+        patterns = set(margin.view(np.uint32).tolist())
+        assert patterns == {expected}, f"XGBoost margin bits {sorted(patterns)}"
+        assert bits32(derived) == expected
+        assert bits32(shipped) == expected
+
+    # The refusal is the behaviour that actually protects a caller, and it is
+    # reached through the shipped path regardless of which non-finite value
+    # arrived.
+    assert not math.isfinite(shipped)
 
 
 def test_deriving_a_non_finite_intercept_emits_no_warning() -> None:
@@ -1064,8 +1315,11 @@ def test_verify_intercept_rejects_positive_zero_for_negative_zero() -> None:
 
 
 def test_verify_intercept_rejects_a_one_ulp_error() -> None:
-    booster, document = fit("survival:cox", base_score=0.7, rounds=3)
-    derived = objectives.derive_intercept(document)
+    booster, _document = fit("survival:cox", base_score=0.7, rounds=3)
+    # The baseline is the engine's own value, not the recipe's. The recipe is
+    # within 1 ULP of it and no closer on every platform (D052), so using it
+    # here made this test darwin-only.
+    derived = objectives.observe_intercept(booster)
     objectives.verify_intercept(booster, derived)
 
     off_by_one_ulp = float(np.nextafter(np.float32(derived), np.float32(np.inf)))
@@ -1093,8 +1347,10 @@ def test_verify_intercept_fires_on_a_recipe_error() -> None:
     not fire on a recipe error -- and it passed the clamp defect of D035
     (D034)."""
     booster, document = fit("binary:logistic", base_score=0.3, rounds=2)
-    honest = objectives.derive_intercept(document)
+    # The engine's own value, so the baseline holds on every platform (D052).
+    honest = objectives.observe_intercept(booster)
     objectives.verify_intercept(booster, honest)
+    recipe_before = bits32(objectives.derive_intercept(document))
 
     original = objectives._logistic_intercept
     try:
@@ -1108,7 +1364,7 @@ def test_verify_intercept_fires_on_a_recipe_error() -> None:
     finally:
         objectives._logistic_intercept = original  # type: ignore[assignment]
 
-    assert bits32(objectives.derive_intercept(document)) == bits32(honest)
+    assert bits32(objectives.derive_intercept(document)) == recipe_before
 
 
 def test_verify_intercept_oracle_is_in_link_space_for_a_model_with_trees() -> None:

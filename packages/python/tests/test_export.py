@@ -920,3 +920,89 @@ def test_every_emitted_number_round_trips_to_an_unchanged_float32() -> None:
 
     assert checked >= 500, f"only checked {checked} numbers; expected at least 500"
     print(f"emission fidelity: checked {checked} numbers")
+
+
+# ---------------------------------------------------------------------------
+# The intercept comes from the engine, and the oracle that guards it fires
+#
+# D052: XGBoost derives this intercept with the platform's `logf`, which is not
+# correctly rounded, and its own answer differs between darwin/arm64 and
+# linux/x86_64 by 1 ULP on 29 of 58 discriminating inputs. Deriving the value
+# instead of reading it out therefore guarantees a spurious refusal on some
+# platform -- which is what CI's first Linux run reported.
+#
+# Taking the value from the oracle removes the intercept comparison, so the
+# check that now stands behind it needs its own teeth proven. It already had
+# them for *tree* defects -- neutering it turns the cleared-live-node and
+# wrong-source-array tests red -- but nothing exercised it against an intercept
+# error, which is precisely the failure it is now the last line against.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("direction", [np.inf, -np.inf])
+def test_the_source_margin_check_fires_on_a_one_ulp_intercept(
+    direction: float,
+) -> None:
+    """The end-to-end oracle detects a single-bit intercept error, in either
+    direction. This is the protection that replaced the derived-versus-observed
+    intercept comparison, and it is strictly stronger: it covers the trees and
+    the accumulation as well, and its oracle is XGBoost's own ``predict`` on
+    rows chosen to reach specific leaves rather than a second reading of the
+    same zero-tree configuration."""
+    booster, _x, names = _fit("binary:logistic", base_score=0.6)
+    artifact = export.export_model(booster, feature_names=names)
+
+    # The baseline must pass, or the negative result below proves nothing.
+    export._verify_against_source_margin(booster, artifact)
+
+    perturbed = dict(artifact)
+    perturbed["intercept"] = float(
+        np.nextafter(np.float32(artifact["intercept"]), np.float32(direction))
+    )
+    assert perturbed["intercept"] != artifact["intercept"], "nextafter did not move"
+
+    with pytest.raises(errors.MarginMismatchError) as caught:
+        export._verify_against_source_margin(booster, perturbed)
+    assert caught.value.mismatches >= 1
+
+
+@pytest.mark.parametrize("objective", ["binary:logistic", "survival:cox"])
+@pytest.mark.parametrize("base_score", [0.9478001, 0.99, 0.999])
+def test_export_succeeds_at_a_base_score_where_a_recipe_would_miss(
+    objective: str, base_score: float
+) -> None:
+    """The regression test for the defect itself.
+
+    These are values whose intercept passes through a logarithm, near 1 where
+    the result is most sensitive to it. Before D052 the exporter derived the
+    intercept and refused the model unless the derivation matched XGBoost
+    bit-for-bit, so on a platform whose ``logf`` differs from numpy's this
+    raised ``InterceptMismatchError`` on a perfectly ordinary model. Export must
+    succeed, and the artifact must reproduce XGBoost's margin on every real row
+    rather than merely on the leaf-reaching sample the exporter checks itself
+    with.
+    """
+    booster, x, names = _fit(objective, base_score=base_score)
+    artifact = export.export_model(booster, feature_names=names)
+
+    matrix = xgb.DMatrix(x, feature_names=names)
+    observed = np.asarray(booster.predict(matrix, output_margin=True), dtype=np.float32)
+    trees = artifact["trees"]
+    intercept = artifact["intercept"]
+
+    mismatches = 0
+    first: tuple[int, str, str] | None = None
+    for index in range(len(x)):
+        walked = walk_margin(trees, intercept, x[index])
+        if int(walked.view(np.uint32)) != int(observed[index].view(np.uint32)):
+            mismatches += 1
+            if first is None:
+                first = (
+                    index,
+                    f"0x{int(walked.view(np.uint32)):08X}",
+                    f"0x{int(observed[index].view(np.uint32)):08X}",
+                )
+    assert mismatches == 0, (
+        f"{objective} at base_score={base_score!r}: {mismatches}/{len(x)} rows "
+        f"differ from XGBoost; first {first!r}"
+    )

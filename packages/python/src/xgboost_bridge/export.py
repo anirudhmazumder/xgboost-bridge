@@ -58,7 +58,7 @@ from .errors import (
     UnsupportedModelShapeError,
     UnsupportedObjectiveError,
 )
-from .objectives import OUTPUT_TRANSFORMS, derive_intercept, verify_intercept
+from .objectives import OUTPUT_TRANSFORMS, observe_intercept
 from .trees import LEAF_CHILD, extract_trees, walk_margin
 from .validate import validate_source_model
 
@@ -160,19 +160,33 @@ def export_model(
 
     trees = extract_trees(document)
 
-    intercept = derive_intercept(document)
+    # Read out of the engine, not computed from base_score. XGBoost derives this
+    # value with the platform's logf, which is not correctly rounded, and its own
+    # answer differs between darwin/arm64 and linux/x86_64 by 1 ULP on 29 of 58
+    # discriminating inputs (probes/platform_log.md, D052). No recipe reproduces
+    # it everywhere, so deriving one guarantees a spurious refusal on some
+    # platform: this is exactly what CI's first Linux run reported, 18 failures
+    # that pass on darwin. objectives.derive_intercept still documents how the
+    # engine reaches the value, and is deliberately no longer on this path.
+    #
+    # The intercept is validated end-to-end by _verify_against_source_margin
+    # below, against XGBoost's own predict output on leaf-reaching rows -- an
+    # oracle that is independent of this value's provenance and that a 1-ULP
+    # error fails. Comparing the engine's value against the engine's value here
+    # would be the decorative check the independent-oracle principle rejects.
+    intercept = observe_intercept(booster)
     if not math.isfinite(intercept):
-        # Reachable and silent upstream: Cox at base_score=0.0 derives -inf, and
-        # at any negative base_score derives NaN, both accepted by XGBoost with
-        # no warning. The derivation reproduces them so the oracle below agrees,
-        # so the refusal lives here. Note the oracle cannot catch it -- a
-        # bit-pattern comparison matches NaN against NaN. See D043.
+        # Reachable and silent upstream: Cox at base_score=0.0 gives -inf, and at
+        # any negative base_score gives NaN, both accepted by XGBoost with no
+        # warning. The refusal lives here because the margin check below cannot
+        # catch it -- for a zero-tree model it compares this value against
+        # itself, and NaN never equals NaN in a bit-pattern comparison anyway.
+        # See D043.
         raise NonFiniteInterceptError(
             intercept,
             document["learner"]["objective"]["name"],
             document["learner"]["learner_model_param"]["base_score"],
         )
-    verify_intercept(booster, intercept)
 
     learner = document["learner"]
     objective_name = learner["objective"]["name"]
