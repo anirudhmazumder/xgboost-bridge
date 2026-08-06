@@ -1,0 +1,179 @@
+name: Release rehearsal (TestPyPI)
+
+# A rehearsal of the real publish path, on an index where a mistake costs a
+# version number instead of a release. Publishing is irreversible on every
+# index that matters, and this workflow has never run, so the OIDC exchange,
+# the build, and the install are exercised here first.
+#
+# What makes this a rehearsal rather than a smoke test: it does not stop at
+# "upload succeeded". It installs the published artifact from TestPyPI into an
+# environment containing nothing else and predicts from it, comparing against
+# XGBoost's own recorded ground truth. An upload that produces an unusable
+# package is the failure worth catching, and only the round trip catches it.
+#
+# It cannot fire accidentally:
+#   1. `workflow_dispatch` is the only trigger. No push, tag, or release event.
+#   2. `environment: testpypi` carries a required reviewer.
+#   3. Publishing uses Trusted Publishing (OIDC) against test.pypi.org only.
+#      There is no PyPI credential anywhere in this file, and the
+#      repository-url below is TestPyPI's, not PyPI's.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: >-
+          Type "rehearse" to confirm intent. Documentary only -- no step reads
+          this value; it exists so the dispatch form states what will happen.
+        required: true
+        type: string
+
+# Read-only by default. The publish job widens to id-token: write for OIDC,
+# and nothing else.
+permissions:
+  contents: read
+
+jobs:
+  rehearse:
+    name: Publish to TestPyPI, then install from it and predict
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      contents: read
+      id-token: write # required for Trusted Publishing; nothing else needs it
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # ---------------------------------------------------------------------
+      # The full gate runs BEFORE anything is published. A publish workflow
+      # that skips its own verification because "CI already passed" is trusting
+      # a different commit's result for this one -- and on an irreversible
+      # operation that is the wrong trade.
+      # ---------------------------------------------------------------------
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Install JavaScript dependencies
+        working-directory: packages/js
+        run: npm ci
+
+      - name: Type-check (separate from the build)
+        working-directory: packages/js
+        run: npm run typecheck
+
+      # The parity harness refuses a bundle older than packages/js/src, so this
+      # must happen before pytest, not after.
+      - name: Build the JavaScript bundle
+        working-directory: packages/js
+        run: npm run build
+
+      - name: Run JavaScript test suite
+        working-directory: packages/js
+        run: npm run test:nobuild
+
+      - name: Install uv and Python 3.12
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          python-version: "3.12"
+
+      - name: Sync workspace
+        run: uv sync
+
+      - name: Run Python test suite (includes the parity harness)
+        run: uv run pytest
+
+      - name: Cross-language parity, both measurement points
+        run: uv run python parity/run_parity.py
+
+      # Verifies the wheel's CONTENTS and that it works when installed, before
+      # that same wheel is uploaded anywhere.
+      - name: Verify the wheel installs and predicts
+        run: ./tools/clean_install_python.sh
+
+      # ---------------------------------------------------------------------
+      # Build and publish.
+      # ---------------------------------------------------------------------
+      - name: Build the distributions to publish
+        run: uv build packages/python --out-dir dist
+
+      - name: Show what is about to be published
+        run: |
+          ls -l dist
+          echo "--- version being spent ---"
+          uv run python -c "import tomllib; print(tomllib.load(open('packages/python/pyproject.toml','rb'))['project']['version'])"
+
+      - name: Publish to TestPyPI (Trusted Publishing, OIDC)
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist
+
+      # ---------------------------------------------------------------------
+      # The round trip. This is the part that makes the rehearsal worth doing.
+      # ---------------------------------------------------------------------
+      - name: Install from TestPyPI into a clean environment and predict
+        run: |
+          set -euo pipefail
+          VERSION=$(uv run python -c "import tomllib; print(tomllib.load(open('packages/python/pyproject.toml','rb'))['project']['version'])")
+          echo "verifying xgboost-bridge==$VERSION from TestPyPI"
+
+          uv venv --python 3.12 /tmp/verify
+
+          # TestPyPI does not mirror numpy, so runtime dependencies must resolve
+          # from PyPI. --index-url selects TestPyPI for our package;
+          # --extra-index-url lets numpy come from the real index.
+          #
+          # Index propagation is not instant, so retry rather than fail on a
+          # race that says nothing about the package.
+          for attempt in 1 2 3 4 5 6; do
+            if uv pip install --python /tmp/verify/bin/python \
+                 --index-url https://test.pypi.org/simple/ \
+                 --extra-index-url https://pypi.org/simple/ \
+                 "xgboost-bridge==$VERSION"; then
+              echo "installed on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" = "6" ]; then
+              echo "FAIL: could not install from TestPyPI after 6 attempts"
+              exit 1
+            fi
+            echo "not available yet; waiting 20s"
+            sleep 20
+          done
+
+          # Predict from OUTSIDE the repository, so the installed package is
+          # what runs rather than the source tree.
+          cp fixtures/corpus/binary_logistic_signed_zero.json /tmp/fixture.json
+          cat > /tmp/verify.py <<'PY'
+          import json, pathlib, sys
+          import numpy as np
+          import xgboost_bridge
+          from xgboost_bridge import Predictor
+
+          where = pathlib.Path(xgboost_bridge.__file__).resolve()
+          assert "site-packages" in where.parts, f"not the installed package: {where}"
+          print("installed at :", where)
+          print("version      :", xgboost_bridge.__version__)
+
+          fixture = json.loads(pathlib.Path("/tmp/fixture.json").read_text())
+          artifact = fixture["artifact"]
+          predictor = Predictor.from_json(artifact)
+
+          ok = 0
+          for i, row in enumerate(fixture["rows"]):
+              values = {n: (float("nan") if v is None else float(v))
+                        for n, v in zip(artifact["feature_names"], row)}
+              got = predictor.margin(values)
+              want = int(fixture["expected_margin"][i], 16)
+              if int(np.float32(got).view(np.uint32)) == want:
+                  ok += 1
+
+          print(f"margin bit-exact vs XGBoost ground truth: {ok}/{len(fixture['rows'])}")
+          if ok != len(fixture["rows"]):
+              sys.exit("FAIL: the published package does not reproduce the recorded margins")
+          print("ROUND TRIP OK: published, installed from TestPyPI, and bit-exact")
+          PY
+          cd /tmp && /tmp/verify/bin/python /tmp/verify.py
