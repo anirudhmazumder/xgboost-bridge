@@ -75,6 +75,14 @@ jobs:
       - name: Run Python test suite
         run: uv run pytest
 
+      # Redundant as a *check* -- test_parity.py already asserts both mismatch
+      # lists are empty, and the job fails above if they are not. It is here for
+      # its output: pytest captures stdout, so a passing suite reports the two
+      # parity numbers nowhere, and "parity is 0.0 on this platform" was a claim
+      # with no visible measurement behind it in any log. This prints the table.
+      - name: Cross-language parity, both measurement points
+        run: uv run python parity/run_parity.py
+
   javascript:
     name: JavaScript suite
     runs-on: ubuntu-latest
