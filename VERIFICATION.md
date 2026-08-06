@@ -91,19 +91,38 @@ Refusing loudly is a feature. Each refusal exists because the alternative is a p
 
 The honest limits. Read this before relying on the numbers above in an environment unlike the one they were measured in.
 
-### Every figure above was measured on one machine
+### Most figures above were measured on one machine
 
 **darwin/arm64** — CPython 3.12.8, numpy 2.5.1, XGBoost 3.3.0, Node 20.19.0 / 24.7.0 / 24.18.0. The installed wheel was additionally exercised at the declared floor, Python 3.10.20 with numpy 1.24.4, on that same machine.
 
-**Continuous integration has not confirmed any of it on Linux or on x86-64.** If you are running on Linux — most people are — the reasoning below is why these results are expected to hold for you, but it is reasoning, not measurement:
+CI now also runs on **linux/x86_64** (glibc 2.39, CPython 3.12.3). The reasoning for why these results carry across platforms was:
 
 - The float32 arithmetic is built only from `+ − × ÷` and exact powers of two, all of which IEEE-754 requires to be correctly rounded. Those cannot vary by platform.
 - The transform calls no `libm`, which is the one component that demonstrably *does* vary by platform.
-- The margin comparison against XGBoost was measured bit-stable across thread counts, batch sizes, and both prediction APIs — 1440 per-row observations, zero divergences — but on this platform only.
+- The margin comparison against XGBoost was measured bit-stable across thread counts, batch sizes, and both prediction APIs — 1440 per-row observations, zero divergences.
 
-Two things that reasoning cannot rule out: an x86-64 `libm` differing somewhere a platform function is still reached that is believed to be off the path, and XGBoost's own `expf` differing by architecture, which would move the six accepted output differences rather than the margins.
+That reasoning also named two things it could not rule out, the first being "an x86-64 `libm` differing somewhere a platform function is still reached that is believed to be off the path." **That is exactly what the first Linux run found**, and it is worth being blunt that reasoning identified the hole and only measurement found what was in it.
 
-**GPU was not measured at all.**
+#### What Linux found: XGBoost's own intercept is not portable
+
+For `binary:logistic` and `survival:cox`, XGBoost computes the margin intercept with the platform's `logf`. IEEE-754 requires correct rounding only for `+ − × ÷ √` and fma — `logf` is not covered. Measured on 58 inputs selected because they discriminate the candidate implementations, **XGBoost's own intercept differs between darwin/arm64 and linux/x86_64 on 29 of them**, always by exactly 1 ULP, in both directions.
+
+Same model file, same `base_score`, same XGBoost 3.3.0. This is an upstream property, not a defect in this library, and it means **XGBoost's own predictions for these two objectives are not bit-reproducible across these platforms.**
+
+The library previously *derived* this intercept and refused any model where its derivation did not match XGBoost bit-for-bit. That refusal is the correct failure mode — it never produced a wrong number — but it fired on valid models: 13 of 50 ordinary `binary:logistic` `base_score` values on Linux. The intercept is now read out of the engine instead, so export is bit-exact against whatever XGBoost is present, on any platform.
+
+**What this means for you:**
+
+- Export is bit-exact against your own XGBoost, wherever you run it.
+- An artifact exported on macOS and one exported on Linux from the same model **may differ in the `intercept` field by one float32 step**, for these two objectives. `reg:squarederror` uses the identity link and is unaffected.
+- **Inference is unaffected and remains bit-identical everywhere.** The intercept is a stored number and neither predictor computes a logarithm, so cross-language agreement is exactly `0.0` regardless of which platform produced the artifact.
+- If you need artifacts to be byte-identical across platforms, export them on one platform. Determinism *within* a platform is byte-identical and tested.
+
+Full evidence, including the first pass at this investigation that reached the opposite conclusion from a sample that could not distinguish the candidates, is in [`probes/platform_log.md`](probes/platform_log.md).
+
+A second, smaller difference: for `survival:cox` at a negative `base_score`, XGBoost returns a NaN whose sign bit differs by platform. Both are quiet NaNs, IEEE-754 does not specify the sign for `log` of a negative, and such a model is refused either way.
+
+**Still unmeasured:** XGBoost's own `expf` differing by architecture, which would move the six accepted *output* differences rather than the margins. **GPU was not measured at all.**
 
 ### Specific gaps, named rather than glossed
 

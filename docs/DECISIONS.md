@@ -542,7 +542,16 @@ Cox and regression are unclamped, confirmed across 34 values from `1.4e-45` to `
 
 ## D040 — Both intercept logarithms are float32 logarithms
 
-*2026-08-02* — **amends D015 and D035**
+*2026-08-02* — **amends D015 and D035**; **narrowed by D053**
+
+> **Narrowed as a generalisation, 2026-08-06.** Everything measured below holds, on
+> darwin/arm64. It is not a fact about XGBoost: XGBoost calls the platform's `logf`, and its
+> own intercept differs between darwin/arm64 and linux/x86_64 by 1 ULP on 29 of 58
+> discriminating inputs. `np.log` of a float32 reproduces XGBoost on one of those platforms,
+> not on both, and no fixed recipe reproduces it on both. The intercept is therefore read out
+> of the engine rather than computed — see **D053** and `probes/platform_log.md`. The
+> float32-versus-float64 route finding below still governs `derive_intercept`, which
+> documents the engine's behaviour and is no longer on the export path.
 
 `np.log` applied to a float32, for both `survival:cox` and `binary:logistic`. **Not** `np.float32(math.log(float(x)))`.
 
@@ -930,3 +939,110 @@ development server on Windows, and `tsup` is a dev dependency — it is in no sh
 artifact, and the zero-runtime-dependency count is asserted in CI. The institutional email
 in commit metadata is the owner's to decide and would require a history rewrite on an
 already-public repository.
+
+## D053 — The intercept is read out of the engine, because upstream is not portable
+
+*2026-08-06* — **supersedes D015's derivation as normative, narrows D040, and retires the export-time intercept comparison of D034**
+
+`export_model` no longer computes the intercept from `base_score`. It reads XGBoost's own
+value via `objectives.observe_intercept`. `objectives.derive_intercept` still documents how
+the engine reaches that value, is still fully tested, and is **off the export path**.
+
+### The measurement
+
+XGBoost derives this intercept with the platform's `logf`. IEEE-754 requires correct
+rounding only for `+ − × ÷ √` and fma; `logf` is not covered. Measured on 58 inputs chosen
+because they discriminate the candidate routes — agreement with XGBoost's observed intercept:
+
+| route | darwin/arm64 | linux/x86_64 |
+|---|---|---|
+| `np.float32(np.log(f32))` — what the exporter used | **58/58** | 36/58 |
+| `np.float32(math.log(f64))` | 10/58 | 39/58 |
+| `Decimal.ln()` at 40 digits | 10/58 | 39/58 |
+| `mpmath` at 60 digits, correctly rounded | 10/58 | 39/58 |
+
+The 10 are control values where every route agrees. **No route is exact on both platforms,
+and the correctly-rounded route is exact on neither** — XGBoost is not correctly rounded
+either, so implementing a correctly-rounded logarithm would be equally wrong.
+
+Diffing XGBoost's own column across platforms: it differs on **29 of 58**, always by exactly
+1 ULP, darwin higher on 15 and lower on 14. Not a systematic offset — last-place rounding.
+`reg:squarederror` takes the identity link and is bit-exact everywhere by every route, which
+localises this to the logarithm. Full evidence in `probes/platform_log.md`.
+
+### Why this resolves the way it does
+
+"Bit-exact against XGBoost" and "platform-independent" are not a choice of recipe here —
+they are incompatible, because upstream itself is not reproducible across platforms for
+these two objectives. A 1-ULP intercept error is **silent**: it shifts every margin the
+model produces, with no error raised. The ordering says match upstream, or refuse the case
+entirely, where divergence would be silent. Reading the value out of the engine satisfies
+that on every platform by construction; deriving it guarantees a spurious refusal somewhere.
+
+The previous behaviour was not *unsafe* — the export gate refused rather than emitting a
+wrong number, which is the intended failure mode. It refused **valid models**, on 13 of 50
+ordinary `binary:logistic` `base_score` values on Linux, and it meant the suite could only
+pass on one platform.
+
+Inference is untouched: the intercept is a stored field, neither predictor computes a
+logarithm, and parity remains exactly `0.0` at both measurement points.
+
+### What checks it now, and why the old check had to go
+
+The intercept comparison is retired rather than relocated. Comparing the engine's value
+against the engine's value is the decorative check the independent-oracle principle rejects,
+and keeping it would have been a check that structurally cannot fire.
+
+What stands behind the intercept is `export._verify_against_source_margin`: the assembled
+artifact must reproduce XGBoost's own `predict(output_margin=True)` bit-for-bit on rows
+chosen to reach specific leaves. That oracle is independent of the value's provenance, and
+it is **strictly stronger** than what it replaces — it covers the trees and the accumulation
+as well, and it validates the value after emission rather than before.
+
+It had teeth for tree defects already; it had **none for an intercept error**, which is now
+the failure it is the last line against. Two tests perturb the artifact's intercept by one
+ULP in each direction and require `MarginMismatchError`. Neutering the check turns five
+tests red, two of them these.
+
+One honest gap, stated rather than glossed: for a **zero-tree** model the margin *is* the
+intercept, so that check is tautological there. There is no derivation left to be wrong
+about — the artifact's only number is the engine's own answer, copied — but it is not
+verification and is not presented as such.
+
+### What this does *not* claim
+
+D040 stands as a measurement and is **narrowed as a generalisation**: `np.log` of a float32
+is the route XGBoost takes *on darwin/arm64*, not the route XGBoost takes. Its own
+methodological lesson was then walked into one level up — a first pass at this investigation
+used 13 hand-picked values, found every route in agreement, and concluded that XGBoost was
+correctly rounded and numpy was the mover. Both halves were false. The rule earns restating:
+**a sample that does not deliberately target the disagreeing inputs cannot distinguish two
+implementations, and its silence is not evidence of equivalence.**
+
+Only two platforms are measured. A third may agree with neither, and the design is
+indifferent to that by construction — which is the point of observing rather than deriving.
+
+### Test consequences
+
+All 18 first-run Linux failures were this defect in three shapes, and each was re-pinned to
+a claim that holds on both platforms rather than loosened:
+
+- **Thirteen** pinned one libm's answer as XGBoost's. Now: the shipped value is exact
+  against the engine, and the recipe is asserted within 1 ULP of it. The shipped gate is
+  *stronger* than before, since it covers emission; the recipe's bound is weaker, on a
+  function that determines no shipped number.
+- **Two** pinned a NaN's sign bit, which differs by platform (`0x7FC00000` versus
+  `0xFFC00000`) and which IEEE-754 leaves unspecified for `log` of a negative. Now pinned as
+  a class — quiet NaN, not finite, refused — plus the refusal itself, which was not asserted
+  before.
+- **Three** were 1-ULP claims that a 1-ULP platform difference erases. `base_score` snapping
+  was pinned at `0.7`, where the snapped and unsnapped routes separate by exactly one step.
+  Re-pinned at `0.99`, `0.999` and `0.999999`, where they separate by 10, 110 and 116804,
+  and the test now asserts its own discrimination so it cannot silently stop testing.
+
+Two tests that pinned *counts* — which `base_score` values the textbook logit gets right,
+and how many values each log route matches — now report those counts and assert the failure
+signature instead. The counts are properties of a libm, and pinning them is what made the
+tests darwin-only.
+
+Python suite 960 → 976.

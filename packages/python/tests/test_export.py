@@ -990,7 +990,7 @@ def test_every_emitted_number_round_trips_to_an_unchanged_float32() -> None:
 # ---------------------------------------------------------------------------
 # The intercept comes from the engine, and the oracle that guards it fires
 #
-# D052: XGBoost derives this intercept with the platform's `logf`, which is not
+# D053: XGBoost derives this intercept with the platform's `logf`, which is not
 # correctly rounded, and its own answer differs between darwin/arm64 and
 # linux/x86_64 by 1 ULP on 29 of 58 discriminating inputs. Deriving the value
 # instead of reading it out therefore guarantees a spurious refusal on some
@@ -1039,7 +1039,7 @@ def test_export_succeeds_at_a_base_score_where_a_recipe_would_miss(
     """The regression test for the defect itself.
 
     These are values whose intercept passes through a logarithm, near 1 where
-    the result is most sensitive to it. Before D052 the exporter derived the
+    the result is most sensitive to it. Before D053 the exporter derived the
     intercept and refused the model unless the derivation matched XGBoost
     bit-for-bit, so on a platform whose ``logf`` differs from numpy's this
     raised ``InterceptMismatchError`` on a perfectly ordinary model. Export must

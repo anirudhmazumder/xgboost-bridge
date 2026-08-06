@@ -467,7 +467,7 @@ def test_recipe_agrees_with_the_engine_to_within_one_ulp(
     ``logf`` is not correctly rounded -- IEEE-754 requires that only for
     ``+ - * / sqrt`` and fma. XGBoost's own answer therefore differs between
     darwin/arm64 and linux/x86_64 by 1 ULP on 29 of 58 discriminating inputs
-    (``probes/platform_log.md``, D052), so no recipe is bit-exact everywhere
+    (``probes/platform_log.md``, D053), so no recipe is bit-exact everywhere
     and requiring it here would mean the suite could only pass on one platform.
 
     What is asserted instead is the bound: the recipe never misses the engine
@@ -564,7 +564,7 @@ def test_logistic_clamp_saturates_to_the_pinned_bounds() -> None:
     # group rather than against a recorded literal. Every value past the
     # transition must reach one and the same intercept -- exactly, on any
     # platform -- and the literal is then a 1-ULP canary, because the bound
-    # itself is reached through the platform's logarithm (D052).
+    # itself is reached through the platform's logarithm (D053).
     for values, recorded in (
         ((0.0, 1.401298464324817e-45, 1e-38, 1e-12, 1e-7), saturated_low),
         ((0.999998927116394, 0.9999999, 1.0), saturated_high),
@@ -609,7 +609,7 @@ def test_logistic_clamp_keeps_the_logarithm_in_its_domain_at_one() -> None:
     assert bits32(objectives.observe_intercept(booster)) == bits32(observed)
     assert ulp_distance(np.float32(objectives.derive_intercept(document)), observed) <= 1
     # 1-ULP canary on the recorded value: the clamp bound's logarithm comes from
-    # the platform's libm (D052). What this test pins is that the argument is
+    # the platform's libm (D053). What this test pins is that the argument is
     # exactly 0.0 without the clamp, which is exact everywhere.
     assert ulp_distance(observed, np.float32(13.745160102844238)) <= 1
 
@@ -691,7 +691,7 @@ def _log_route_candidates(
 def test_no_fixed_log_recipe_reproduces_the_engine_on_every_platform(
     objective: str, values: tuple[float, ...]
 ) -> None:
-    """Why the intercept is read out of the engine instead of computed (D052).
+    """Why the intercept is read out of the engine instead of computed (D053).
 
     These inputs were chosen because the candidate recipes disagree on them.
     An ordinary sweep cannot see any of this -- the routes agree on 99.945% of
@@ -748,7 +748,7 @@ def test_no_fixed_log_recipe_reproduces_the_engine_on_every_platform(
     assert float32_route_misses + float64_route_misses >= 1, (
         f"{objective}: both candidate recipes reproduced the engine on all "
         f"{total} inputs, which would mean a fixed recipe is viable after all "
-        f"and D052 needs revisiting\n{report}"
+        f"and D053 needs revisiting\n{report}"
     )
 
 
@@ -817,7 +817,7 @@ def test_textbook_logit_is_not_the_logistic_transform() -> None:
 
     # *Which* values the textbook formula happens to get right depends on the
     # platform's libm, so the list is reported rather than pinned -- pinning it
-    # to [0.7] is what made this test darwin-only (D052). What is asserted is
+    # to [0.7] is what made this test darwin-only (D053). What is asserted is
     # the failure signature itself: right on some inputs, wrong on others, no
     # error raised anywhere, and an error large enough to breach the gate.
     print(f"textbook formula was bit-exact on {right}")
@@ -841,7 +841,7 @@ def test_base_score_is_snapped_to_float32_before_the_transform(
     110 and 116804 ULP respectively. The superseded version used ``0.7``, where
     they separate by exactly 1 -- a true measurement that a 1-ULP difference in
     the platform's ``logf`` erases completely, and it duly failed on
-    linux/x86_64 while passing on darwin/arm64 (D052). A claim worth pinning
+    linux/x86_64 while passing on darwin/arm64 (D053). A claim worth pinning
     should be pinned where it is not a last-bit coincidence.
     """
     booster, document, observed = zero_tree_oracle("survival:cox", base_score)
@@ -1032,7 +1032,7 @@ def test_cox_reproduces_xgboost_non_finite_intercepts(
     returns ``0x7FC00000`` on darwin/arm64 and ``0xFFC00000`` on linux/x86_64,
     and IEEE-754 leaves the sign of a NaN from ``log`` of a negative number
     unspecified, so the sign bit is not a behaviour to pin. The superseded
-    version pinned it and was 2 of the 18 first Linux failures (D052). What
+    version pinned it and was 2 of the 18 first Linux failures (D053). What
     matters here is that the value is not finite and is therefore refused,
     which holds on both platforms.
     """
@@ -1317,7 +1317,7 @@ def test_verify_intercept_rejects_positive_zero_for_negative_zero() -> None:
 def test_verify_intercept_rejects_a_one_ulp_error() -> None:
     booster, _document = fit("survival:cox", base_score=0.7, rounds=3)
     # The baseline is the engine's own value, not the recipe's. The recipe is
-    # within 1 ULP of it and no closer on every platform (D052), so using it
+    # within 1 ULP of it and no closer on every platform (D053), so using it
     # here made this test darwin-only.
     derived = objectives.observe_intercept(booster)
     objectives.verify_intercept(booster, derived)
@@ -1347,7 +1347,7 @@ def test_verify_intercept_fires_on_a_recipe_error() -> None:
     not fire on a recipe error -- and it passed the clamp defect of D035
     (D034)."""
     booster, document = fit("binary:logistic", base_score=0.3, rounds=2)
-    # The engine's own value, so the baseline holds on every platform (D052).
+    # The engine's own value, so the baseline holds on every platform (D053).
     honest = objectives.observe_intercept(booster)
     objectives.verify_intercept(booster, honest)
     recipe_before = bits32(objectives.derive_intercept(document))

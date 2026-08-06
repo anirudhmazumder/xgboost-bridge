@@ -25,8 +25,16 @@ version that is correct on most inputs and wrong on a few:
   ``base_score = 1 - 1e-10``, which stores as ``[1E0]``.
 * Both logarithms are **float32** logarithms -- ``np.log`` of a float32, not
   a float64 logarithm narrowed afterwards (D040). The two routes disagree on
-  0.055% of float32 inputs, so an ordinary sweep finds nothing; on the
-  disagreeing inputs only the float32 route matches XGBoost.
+  0.055% of float32 inputs, so an ordinary sweep finds nothing.
+* **The recipe is not what ships, and cannot be** (D053). XGBoost derives the
+  intercept with the platform's ``logf``, which IEEE-754 does not require to
+  be correctly rounded, and its own answer differs between darwin/arm64 and
+  linux/x86_64 by 1 ULP on 29 of 58 discriminating inputs
+  (``probes/platform_log.md``). D040's "only the float32 route matches
+  XGBoost" is true of one libm and was mistaken for a fact about XGBoost.
+  :func:`observe_intercept` reads the value out of the engine;
+  :func:`derive_intercept` documents how the engine reaches it and is off the
+  export path.
 * The textbook ``log(p / (1 - p))`` is **not** the logistic transform. The
   float32 ``1 / p - 1`` intermediate is (``probes/base_score.md`` section 5).
 
@@ -186,7 +194,7 @@ def observe_intercept(booster: Any) -> float:
             configuration it was asked for. A broken instrument is reported as
             such rather than returned as a number.
 
-    **Why the value is taken from the engine rather than computed (D052).**
+    **Why the value is taken from the engine rather than computed (D053).**
     XGBoost derives this intercept with the platform's ``logf``, and ``logf``
     is not correctly rounded -- IEEE-754 requires that only for
     ``+ - * / sqrt`` and fma. Measured on 58 inputs chosen because they

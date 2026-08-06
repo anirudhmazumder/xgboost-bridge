@@ -233,9 +233,38 @@ A predictor **MUST NOT** apply `logit`, `ln`, `exp`, or any other function to th
 >
 > The transform is not merely delicate, it is *specifically* delicate. The textbook `log(p/(1-p))` is not equivalent: it is bit-wrong on 16 of 27 measured values and **breaches the `1e-6` margin gate** (`probes/base_score.md` §5). Independently reproduced during the probe phase at 100 trees: `7.63e-06` at `base_score=0.987654` and `1.91e-06` at `0.48`, against `0.0` for the correct form. Reproducing it requires the exact float32 expression, not generic float32 discipline. Implementing that once, in one language, is categorically safer than mirroring it in two.
 
-### 6.1 Deriving the intercept at export — the exact rule
+### 6.1 Obtaining the intercept at export — read it from the engine
 
-Two things select the space. Both are read from the source model; neither is guessed.
+> **Normative, and it changed.** A producer **must** read this value out of the engine that
+> holds the model, not compute it from `base_score`. The per-objective rule that follows is
+> **informative**: it describes what the engine does, and it is not bit-exact everywhere.
+>
+> XGBoost derives this intercept with the platform's `logf`, which IEEE-754 does not require
+> to be correctly rounded. Its own answer differs between darwin/arm64 and linux/x86_64 on
+> **29 of 58** discriminating inputs, always by exactly 1 ULP, and no fixed recipe — including
+> a correctly-rounded logarithm — reproduces it on both. "Bit-exact against XGBoost" and
+> "platform-independent" are therefore incompatible goals here rather than a choice of recipe.
+> A 1-ULP intercept error is silent, shifting every margin the model produces, so the value
+> must come from the engine. See **D053** and `probes/platform_log.md`.
+>
+> In this implementation that is `objectives.observe_intercept`: for a model with **zero
+> trees** the booster's own margin already *is* the intercept and is read directly; for a
+> model **with trees**, a zero-boosting-round model is fitted with the same objective and
+> `base_score` passed **explicitly** — explicit is mandatory, since left at its default
+> `boost_from_average` stays `"1"` and the oracle returns the raw value instead of the
+> transform. The refit is deterministic: 8 configurations × 15 repeats gave one distinct bit
+> pattern each, stable across separate interpreters.
+>
+> **Consequence a producer must accept:** an artifact exported on darwin/arm64 and one
+> exported on linux/x86_64 from the same model may differ in this one field by 1 ULP, for
+> `binary:logistic` and `survival:cox`. That is upstream's non-reproducibility recorded
+> faithfully, not an inconsistency in this format. It does not reach inference — the value is
+> stored, and no consumer computes a logarithm — so cross-language parity is exactly `0.0`
+> regardless of which platform exported the artifact. `reg:squarederror` takes the identity
+> link and is unaffected.
+
+The rest of this subsection describes how the engine reaches the value. Two things select the
+space. Both are read from the source model; neither is guessed.
 
 **Step 1 — `boost_from_average` decides whether a transform applies at all.** Read `learner.learner_model_param.boost_from_average`. When there are **zero trees** and it is `"1"`, XGBoost emits the **raw `base_score`** as the margin, with no link transform. Verified: logistic default gives margin `0.5` where the link would give `-0.0`; Cox default gives `0.5` where the link would give `-0.693147`. Every model with at least one tree applies the transform.
 
@@ -249,7 +278,9 @@ This field is load-bearing and was previously absent from this specification. Fl
 | `survival:cox` | **float32** `log(f32(base_score))`. No clamp — verified across 34 values from `1.4e-45` to `3.4e38` |
 | `binary:logistic` | **Clamp `p` to `[f32(1e-6), f32(1 - 1e-6)]` first**, then **float32** `-log(f32(f32(1/p) - 1))` |
 
-**The logarithm is a float32 logarithm in both cases, not a float64 logarithm narrowed afterwards.** In Python that is `np.log` applied to a float32; it is *not* `np.float32(math.log(float(x)))`. The two differ, and only the float32 route matches XGBoost.
+**The logarithm is a float32 logarithm in both cases, not a float64 logarithm narrowed afterwards.** In Python that is `np.log` applied to a float32; it is *not* `np.float32(math.log(float(x)))`. The two differ on 0.055% of float32 inputs, and on darwin/arm64 only the float32 route matches XGBoost.
+
+That last clause is platform-specific, which is why this rule is informative rather than normative. On linux/x86_64 the float32 route matches XGBoost on 36 of 58 discriminating inputs and the float64 route on 39 — neither is exact, and the correctly-rounded value is not exact either. Do not implement this rule and compare it to the engine expecting equality; read the value from the engine per the box above.
 
 > **Why this is called out, and how it was nearly missed.** The two routes disagree on only **0.055%** of float32 inputs, so a sweep that samples ordinary values finds nothing. Two separate sweeps — one of 79 values, one of 1432 — both concluded "no difference," and one of them explicitly recorded logistic as unaffected.
 >
@@ -263,9 +294,28 @@ Getting this wrong does not merely shift a digit — because §6.2 requires the 
 
 ### 6.2 The export-time intercept check uses an independent oracle
 
-The exporter **MUST** validate the derived intercept against **XGBoost's own observed margin on a tree-free model**, requiring bit equality. It **MUST NOT** validate by re-deriving the intercept from `base_score` and comparing the two derivations.
+> **Superseded by D053.** This comparison is **retired**, because §6.1 now takes the intercept
+> *from* the oracle described below. Comparing the engine's value against the engine's value
+> cannot fire, and a check that cannot fire is decorative by this section's own standard — so
+> it was removed rather than kept for reassurance.
+>
+> **What validates the intercept instead.** The assembled artifact **MUST** reproduce
+> XGBoost's own `predict(output_margin=True)` bit-for-bit, on rows chosen to reach specific
+> leaves (§8.3). That oracle is independent of where the intercept came from, and it is
+> strictly stronger than what it replaces: it covers the trees and the accumulation as well as
+> the intercept, and it validates the value *after* emission rather than before. A 1-ULP
+> intercept error fails it, which is pinned in both directions.
+>
+> **One honest gap.** For a **zero-tree** model the margin *is* the intercept, so that check is
+> tautological there. There is no derivation left to be wrong about — the artifact's only
+> number is the engine's own answer, copied — but it is not verification and is not presented
+> as such.
+>
+> The paragraphs below still describe how to *obtain* the engine's value, which §6.1 requires,
+> so the two oracle shapes remain normative. Only the comparison is gone.
 
-Which tree-free model, exactly, depends on the case — and getting this backwards makes the check reject correct intercepts:
+The tree-free model to read depends on the case — and getting this backwards yields an
+intercept in the wrong space:
 
 | Source model | Oracle |
 |---|---|

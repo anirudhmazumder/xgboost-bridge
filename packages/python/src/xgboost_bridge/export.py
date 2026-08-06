@@ -163,7 +163,7 @@ def export_model(
     # Read out of the engine, not computed from base_score. XGBoost derives this
     # value with the platform's logf, which is not correctly rounded, and its own
     # answer differs between darwin/arm64 and linux/x86_64 by 1 ULP on 29 of 58
-    # discriminating inputs (probes/platform_log.md, D052). No recipe reproduces
+    # discriminating inputs (probes/platform_log.md, D053). No recipe reproduces
     # it everywhere, so deriving one guarantees a spurious refusal on some
     # platform: this is exactly what CI's first Linux run reported, 18 failures
     # that pass on darwin. objectives.derive_intercept still documents how the
