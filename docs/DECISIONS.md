@@ -940,6 +940,46 @@ artifact, and the zero-runtime-dependency count is asserted in CI. The instituti
 in commit metadata is the owner's to decide and would require a history rewrite on an
 already-public repository.
 
+### The historical record is exempt — and the exemption arrived one step too late
+
+D052 as first committed treated `docs/DECISIONS.md` two ways in the same change.
+The specifier check **excluded** it, so a decision entry could quote a dependency range
+that had been withdrawn — correct, and the reason was written down. The vocabulary scrub
+**did not** exclude it, flagged this file for naming the identifiers the fixed blind spot
+used to miss, and the prose was rewritten to satisfy the check. Same file, same category
+of content, opposite rule, one commit.
+
+Settled once, in `packages/python/tests/_policy.py`, and applied by both:
+
+> **The historical record is exempt from any check that would otherwise edit it.**
+
+A decision entry and a probe transcript are evidence. Their value is that they say what
+was true at the time — including the wrong value, the withdrawn specifier, and the
+identifier that used to slip. A check that forces evidence to be rewritten to stay green
+does not make the repository more correct; it makes the record less accurate, and it does
+so invisibly, because the edit looks like a passing build.
+
+Scope is `docs/DECISIONS.md` and everything under `probes/`, **prose scanning only**.
+Nothing is exempt from a behavioural test, and neither check that consults the policy can
+affect a prediction. `FORMAT.md`, `COMPAT.md`, `VERIFICATION.md` and both package READMEs
+stay fully in scope for both checks — they are documents a user acts on, not records of
+what was once believed. Measured, not assumed: a domain term added to `docs/DECISIONS.md`
+and to `probes/accumulation.md` leaves the scrub green; the same term in `COMPAT.md` or in
+`packages/js/src/predict.ts` fails it.
+
+`test_export::test_the_pinned_documents_are_not_part_of_the_historical_record` is where
+the two checks meet. Without it, the specifier check's document list is an independent
+allow-list that merely happens to agree with the scrub's exemption; adding a historical
+file to it would demand that a superseded entry be edited to match the current manifest,
+and nothing would have objected.
+
+**The rewrites this exemption would have made unnecessary are deliberately kept.** Under
+the rule now in force, the earlier sentence naming the four camelCase identifiers, and the
+first draft of this entry, would both have passed untouched. Reverting them to prove the
+point would be a third edit to the same record for the convenience of the tooling, which
+is the behaviour the rule exists to stop. The concrete spellings live in `must_flag`,
+which is where an executable check belongs, and this paragraph is the record that the
+exemption arrived after the edits rather than before them.
 ## D053 — The intercept is read out of the engine, because upstream is not portable
 
 *2026-08-06* — **supersedes D015's derivation as normative, narrows D040, and retires the export-time intercept comparison of D034**

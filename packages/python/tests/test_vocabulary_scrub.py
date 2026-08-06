@@ -19,9 +19,28 @@ teaches reviewers to ignore the check.
 
 from __future__ import annotations
 
+import importlib.util
 import re
 import subprocess
 from pathlib import Path
+
+
+def _load_policy():
+    """`_policy.py` holds the one definition of the historical-record exemption.
+
+    Loaded by path because pytest runs under `--import-mode=importlib`, which
+    does not put this file's directory on `sys.path`. See `_policy` for the rule
+    and why it is shared with `test_export` rather than restated here.
+    """
+    path = Path(__file__).resolve().with_name("_policy.py")
+    spec = importlib.util.spec_from_file_location("_xgboost_bridge_test_policy", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_POLICY = _load_policy()
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -130,6 +149,11 @@ def _candidate_files() -> list[Path]:
         if path.name in EXCLUDED_NAMES:
             continue
         if path.resolve() == SELF:
+            continue
+        # The historical record is exempt from checks that would otherwise edit
+        # it -- the same rule `test_export`'s specifier check applies, from the
+        # same definition. See `_policy`.
+        if _POLICY.is_historical_record(Path(line)):
             continue
         if path.is_file():
             files.append(path)
