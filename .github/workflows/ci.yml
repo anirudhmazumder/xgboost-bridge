@@ -4,23 +4,17 @@ name: CI
 # this file can push a package anywhere. See COMPAT.md and DECISIONS.md for
 # the compatibility and release policy, and .github/workflows/release.yml
 # (configured, never executed) for the release mechanics.
-# Triggers are spelled out with explicit branch filters rather than as bare
-# null-valued event keys. `on: {push: null}` is a common idiom and GitHub does
-# register a workflow written that way -- it registered this one, state=active --
-# but the first push to this repository produced zero workflow runs AND zero
-# check-suites, meaning the workflow was never dispatched rather than dispatched
-# and failed. The null events were the only structural difference between this
-# file and release.yml, whose single event carries a mapping, so they are removed
-# as a variable. `workflow_dispatch` is deliberate too: it is the manual escape
-# hatch, and it is the experiment that separates a workflow-file cause from an
-# account-level one, because a manual run that also produces nothing exonerates
-# this file entirely.
-on:
-  push:
-    branches: ["**"]
-  pull_request:
-    branches: ["**"]
-  workflow_dispatch:
+# Sequence form, deliberately. The original block used bare null-valued event
+# keys and produced zero runs AND zero check-suites on push -- never dispatched,
+# rather than dispatched and failed. Rewriting it with explicit `branches: ["**"]`
+# filters did not fix it either. This form is the canonical spelling from
+# GitHub's own documentation and has neither a null mapping nor a glob to be
+# ambiguous about, so it removes both variables at once. Firing on every branch
+# is what is wanted here regardless.
+#
+# workflow_dispatch stays: it is the manual escape hatch, and it is what proved
+# Actions itself works on this repository when push triggering did not.
+on: [push, pull_request, workflow_dispatch]
 
 # Least privilege: nothing here needs to write to the repository. Stated rather
 # than inherited, so a later job cannot quietly gain more.

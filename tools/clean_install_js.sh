@@ -18,8 +18,18 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 echo "== building and packing =="
-npm --prefix "$REPO/packages/js" run build >/dev/null 2>&1
-(cd "$REPO/packages/js" && npm pack --pack-destination "$WORK" >/dev/null 2>&1)
+# Install the dev dependencies first. This script must be self-contained: on a
+# fresh checkout there is no packages/js/node_modules, so `npm run build` would
+# invoke tsup and exit 127. That is exactly how this failed on its first CI run
+# while passing locally, where node_modules already existed.
+#
+# `npm ci` rather than `npm install`, so the build being verified is the build
+# the lockfile describes rather than whatever resolves today.
+npm --prefix "$REPO/packages/js" ci --silent --no-audit --no-fund
+# stderr is NOT swallowed here. The first version discarded it, which turned a
+# one-line "tsup: not found" into an opaque exit code.
+npm --prefix "$REPO/packages/js" run build >/dev/null
+(cd "$REPO/packages/js" && npm pack --pack-destination "$WORK" >/dev/null)
 TARBALL="$(find "$WORK" -name '*.tgz' | head -1)"
 echo "   tarball: $(basename "$TARBALL")"
 
