@@ -1484,6 +1484,85 @@ def test_predictions_are_unchanged_when_the_objective_field_is_corrupted(name: s
 
 
 # ---------------------------------------------------------------------------
+# `provenance` is read by no prediction path (D015).
+# ---------------------------------------------------------------------------
+
+#: The three keys of the provenance block, plus the block's own name. A read of
+#: any of them on a prediction path would make provenance operative, which D015
+#: forbids: the artifact carries exactly one operative numeric intercept, and
+#: provenance exists for a human inspecting an artifact after the fact.
+FORBIDDEN_PROVENANCE_NAMES = frozenset(
+    {"provenance", "base_score", "exporter_version", "xgboost_version"}
+)
+
+
+def test_no_prediction_path_function_reads_the_provenance_block() -> None:
+    """The source-level half, written exactly as D028's is (D019, D047).
+
+    D015 says no predictor reads provenance, in either language. Nothing
+    asserted it: the test that names provenance checks only that the block is
+    exposed with the right keys, which a predictor reading it would pass.
+    Without this, a future contributor reads ``provenance["base_score"]`` on
+    the prediction path and the field silently stops being metadata -- and
+    because it holds the *unclamped, untransformed* value, anything derived
+    from it is wrong by up to 13.8 in margin space (D035).
+    """
+    source = PREDICT_SOURCE_PATH.read_text(encoding="utf-8")
+    definitions = _function_definitions(source)
+    missing = sorted(PREDICTION_PATH_FUNCTIONS - set(definitions))
+    assert not missing, (
+        f"prediction-path functions not found in predict.py: {missing} -- this "
+        "check silently covers nothing if the names drift"
+    )
+
+    findings: list[str] = []
+    for name in sorted(PREDICTION_PATH_FUNCTIONS):
+        definition = definitions[name]
+        docstring_nodes = {
+            id(statement.value)
+            for statement in definition.body
+            if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant)
+        }
+        for node in ast.walk(definition):
+            if isinstance(node, ast.Attribute) and node.attr.strip("_") in FORBIDDEN_PROVENANCE_NAMES:
+                findings.append(f"{name}: attribute {node.attr!r}")
+            elif isinstance(node, ast.Name) and node.id.strip("_") in FORBIDDEN_PROVENANCE_NAMES:
+                findings.append(f"{name}: name {node.id!r}")
+            elif (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and node.value in FORBIDDEN_PROVENANCE_NAMES
+                and id(node) not in docstring_nodes
+            ):
+                findings.append(f"{name}: literal {node.value!r}")
+
+    assert not findings, "the prediction path reads provenance:\n" + "\n".join(findings)
+
+
+@pytest.mark.parametrize("name", GROUND_TRUTH_FIXTURES)
+def test_predictions_are_unchanged_when_the_provenance_block_is_corrupted(name: str) -> None:
+    """The behavioural half, because a source scan can be evaded (D047).
+
+    The block is replaced *after* loading, so the load-time validation of its
+    keys and types still ran on the real value. Every number the predictor
+    produces must be bit-identical afterwards.
+    """
+    fixture = FIXTURES[name]
+    rows = [_row_mapping(fixture, row) for row in fixture["rows"]]
+
+    honest = Predictor.from_json(fixture["artifact"])
+    before = [(_bits(honest.margin(row)), _bits(honest.output(row))) for row in rows]
+
+    corrupted = Predictor.from_json(fixture["artifact"])
+    corrupted._provenance = {  # noqa: SLF001 -- the point of the test
+        key: "corrupted" for key in PROVENANCE_KEYS
+    }
+    after = [(_bits(corrupted.margin(row)), _bits(corrupted.output(row))) for row in rows]
+
+    assert before == after, f"{name}: predictions changed with the provenance block"
+
+
+# ---------------------------------------------------------------------------
 # The reader's constants must not drift from the writer's.
 # ---------------------------------------------------------------------------
 

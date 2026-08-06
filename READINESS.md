@@ -1,6 +1,6 @@
 # 1.0 readiness
 
-State of the repository at commit `6b27ae5`. Every number below was measured at that tip, not carried forward from an earlier report.
+State of the repository at the tip of `main`. Every number below was measured at that tip, not carried forward from an earlier report.
 
 Nothing has been pushed and nothing has been published.
 
@@ -10,10 +10,10 @@ Nothing has been pushed and nothing has been published.
 
 | Check | Threshold | Result |
 |---|---|---|
-| Python suite | All pass; count never decreases | **882 passed**, 0 failed, 0 skipped, 0 xfailed |
-| Node suite | All pass; count never decreases | **106 pass**, 0 fail, 0 skipped, 0 todo |
-| **Margin parity, Python vs JS** | **Exactly `0.0`**, bit patterns | **`0.0`** across 299 rows |
-| **Output parity, Python vs JS** | **Exactly `0.0`**, bit patterns | **`0.0`** across 299 rows |
+| Python suite | All pass; count never decreases | **960 passed**, 0 failed, 0 skipped, 0 xfailed |
+| Node suite | All pass; count never decreases | **112 pass**, 0 fail, 0 skipped, 0 todo |
+| **Margin parity, Python vs JS** | **Exactly `0.0`**, bit patterns | **`0.0`** across 299 corpus rows, and across **100,004** generated rows |
+| **Output parity, Python vs JS** | **Exactly `0.0`**, bit patterns | **`0.0`** across 299 corpus rows, and across **100,004** generated rows |
 | Python vs XGBoost, margin | Absolute ≤ `1e-6` | **`0.0` bit-exact**, 289/289 rows |
 | Python vs XGBoost, output | Relative ≤ `1e-6` | max **`9.56e-08`**, 283/289 bit-exact |
 | Bundled transform vs `mpmath` (50 dp) | Max ULP, per side | `exp` **1**, `sigmoid` **2**, both languages |
@@ -24,6 +24,47 @@ Nothing has been pushed and nothing has been published.
 | Vocabulary scrub | Executable, self-testing, clean | clean |
 
 The single warning in the Python suite is XGBoost's own `booster=gblinear` deprecation notice, emitted during the test that asserts gblinear is refused.
+
+### Cross-platform reproducibility is asserted by construction and is not yet evidence
+
+**CI has never executed.** Every figure in the table above was measured on a single machine: **darwin/arm64**, CPython 3.12.8, numpy 2.5.1, XGBoost 3.3.0, and Node 20.19.0 / 24.7.0 / 24.18.0. The wheel was additionally exercised at the declared floor, Python 3.10.20 with numpy 1.24.4 — on that same machine.
+
+The claim that these results hold on another platform rests on **argument, not measurement**:
+
+- Float32 arithmetic is simulated from `+ - * /` and exact power-of-two scaling only, all of which IEEE-754 mandates to be correctly rounded, so they cannot vary by platform.
+- The transform calls no `libm`, which is the one component that demonstrably *does* vary — measured at up to 2 ULP between V8 and Apple's `libm`.
+- The margin comparison against XGBoost was measured bit-stable across thread counts, batch sizes, and both prediction APIs: 1440 per-row observations, 0 divergences — **on this platform**. GPU was not measured at all.
+
+That reasoning is sound, and it is still not evidence. Two things it cannot rule out: an x86-64 `libm` reaching a different result somewhere a platform function is still called that we believe is off the path, and XGBoost's own `expf` differing by architecture — which would move the six accepted output divergences rather than the margins.
+
+**The first green CI run on Linux x86-64 is the point at which this claim becomes evidence.** Until then every number above is single-platform, single-architecture. The `python` and `javascript` jobs in `ci.yml` have been checked against what exists locally but have never run.
+
+### Parity row counts: why 289 and 299 are both correct
+
+The two figures answer different questions; neither is a subset error.
+
+| Count | What it is |
+|---|---|
+| **289** | Corpus rows carrying XGBoost ground truth. The denominator for *margin vs XGBoost* |
+| **299** | All corpus rows: the 289 above **plus** the 10 rows of `adversarial/non_finite_input_refusal`. The denominator for *parity* |
+
+The 10 extra rows carry `+/-inf` feature values and **deliberately have no numeric ground truth**, because XGBoost itself has no single answer for them: it raises through `DMatrix` and treats them as ordinary comparable values through `inplace_predict`, giving two different predictions for one input. D022 refuses them for exactly that reason, so there is no XGBoost margin to compare against.
+
+They remain part of the **parity** gate, because agreement on *refusing* is as much a cross-language property as agreement on a value — both sides must refuse the same rows with the same error type. Excluding them would make a row silently skipped on both sides indistinguishable from a row that passed, which is the failure the harness's own injection tests exist to catch.
+
+### Parity at scale
+
+299 rows is thin for the project's headline gate, so both measurement points were re-run at **100,004 rows** across all 23 artifacts, with the two languages fed **bit-identical float64 inputs** exchanged as bit patterns rather than decimals:
+
+```
+rows compared             100004
+margin-point mismatches        0
+output-point mismatches        0
+refusal disagreements          0
+fixtures with any mismatch  0 of 23
+```
+
+Composition is adversarial rather than uniform, because uniform rows cannot find the defect that matters — 0 of 20,000 random continuous rows detect the float32 comparison error. Of the 100,004: **5,828 land exactly on a `float32(threshold)`** drawn from the artifact under test, 112 carry `NaN` on the missing-value path, and 654 carry a subnormal or a value beyond `1e30`. Sensitivity was confirmed at this scale: injecting one ULP into a single row of 100,004 produces exactly one margin-point mismatch and zero output-point mismatches.
 
 ---
 
@@ -146,8 +187,18 @@ The project's own premise is that a plausible wrong number is worse than a crash
 
 ---
 
+## Decision coverage
+
+Every `DECISIONS.md` entry asserting runtime behaviour is now mapped to a test that goes red when the behaviour is reverted. The map is `DECISION_COVERAGE.md`: **38 behavioural** entries, **13 process or metadata**.
+
+It exists because D022 was specified in two documents, implemented nowhere, and found by accident four days later while every gate stayed green. Six behavioural decisions turned out to have **no pinning test** — including the leaf-detection rule and the rule that no predictor reads `provenance`, each of which could be reverted with **zero tests going red in either language**. All six are now pinned. Nothing else was found specified-but-unimplemented.
+
+Five behaviours cannot be reverted in isolation because another site absorbs them. Each is named with its absorbing site rather than covered by a test that would prove nothing.
+
 ## Handoff
 
 Complete and verified. The two things that were never mine remain undone: **pushing to a remote, and publishing to PyPI or npm.**
 
-18 commits on `main`, working tree clean.
+21 commits on `main`, working tree clean.
+
+`origin` is configured, **private, and empty** — no branches, no commits, `size: 0`. GitHub did not auto-create a README or an initial commit, so the local history is a clean first push with nothing to reconcile. Verified read-only through the GitHub API; `git fetch` could not authenticate in this environment.

@@ -25,7 +25,9 @@ import json
 import math
 import subprocess
 import sys
+import tomllib
 import warnings
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -34,6 +36,8 @@ import xgboost as xgb
 
 from xgboost_bridge import errors, export
 from xgboost_bridge.trees import extract_trees, reachable_nodes, walk_margin
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 OBJECTIVES = ("reg:squarederror", "binary:logistic", "survival:cox")
 
@@ -306,6 +310,35 @@ def test_export_refuses_an_untested_xgboost_version_before_anything_numeric() ->
         export.export_model(
             booster, feature_names=names, tested_versions=frozenset({"0.0.1"})
         )
+
+
+def test_the_export_extra_pins_exactly_the_enumerated_version_ceiling() -> None:
+    """The declared extra and the code's ceiling are one list, compared here.
+
+    ``DEFAULT_TESTED_VERSIONS`` is the enumerated ceiling of D018: export raises
+    for a producing version outside it. The published ``export`` extra decides
+    which xgboost a fresh ``pip install`` actually resolves. When those two
+    disagree the *installed* package raises ``UnsupportedVersionError`` on the
+    first call -- which is what shipped once, because the extra said
+    ``xgboost>=3.3,<4`` while 3.4.0 was on the index (D051).
+
+    Every test in this repository runs against the source tree, where the
+    workspace pins the version, so no prediction can see this. A comparison of
+    the two declarations can. A range spelling fails here even when it happens
+    to resolve correctly today: ``3.3.1`` would also be untested and would also
+    raise, so the dependency specifier has to equal the tested list rather than
+    contain it.
+    """
+    manifest = tomllib.loads(
+        (REPO_ROOT / "packages" / "python" / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    declared = manifest["project"]["optional-dependencies"]["export"]
+
+    expected = sorted(f"xgboost=={version}" for version in export.DEFAULT_TESTED_VERSIONS)
+    assert sorted(declared) == expected, (
+        "the export extra and the enumerated version ceiling disagree: "
+        f"{sorted(declared)} against {expected}"
+    )
 
 
 def test_export_refuses_dart_before_reaching_the_numeric_path() -> None:

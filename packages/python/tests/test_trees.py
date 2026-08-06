@@ -90,6 +90,7 @@ from xgboost_bridge.errors import (
 )
 from xgboost_bridge.trees import (
     DELETED_NODE_MARKER,
+    LEAF_CHILD,
     TREE_KEYS,
     _neutralize_node,
     extract_trees,
@@ -1204,6 +1205,44 @@ def test_a_leaf_only_tree_contributes_its_value() -> None:
         "split_indices": [0],
     }
     assert _bits(walk_margin([tree], np.float32(0.5), [0.0])) == _bits(np.float32(0.625))
+
+
+def test_the_leaf_test_is_left_children_and_never_right_children() -> None:
+    """Step 3 of the normative recipe: a node is a leaf iff ``left_children`` is ``-1``.
+
+    ``right_children[i] == -1`` coincides at a scalar leaf, so on every tree
+    this library accepts the two tests are interchangeable and no prediction
+    can tell them apart. They part company on the vector-leaf shape, where a
+    leaf's ``right_children`` slot carries a block index into ``leaf_weights``
+    instead of ``-1`` (``probes/tree_structure.md`` section 7g). ``extract_trees``
+    and the reader both refuse that shape, so the rule is observable only
+    through ``walk_margin`` itself -- which is public, is normative, and is what
+    the JavaScript port and the parity harness are measured against.
+
+    Node 1 below is a leaf whose ``right_children`` entry is ``5``. Keyed on
+    ``left_children`` the walk adds that leaf's value. Keyed on
+    ``right_children`` it reads node 1 as internal and descends into slots that
+    are not children, which yields an ordinary-looking number rather than an
+    error -- this project's failure signature, and the reason the rule is
+    stated as an iff rather than as a convenience.
+    """
+    tree = {
+        "default_left": [0, 0, 0],
+        "left_children": [1, LEAF_CHILD, LEAF_CHILD],
+        "node_values": [0.5, 0.25, -8.0],
+        "right_children": [2, 5, LEAF_CHILD],
+        "split_indices": [0, 0, 0],
+    }
+    assert tree["left_children"][1] == LEAF_CHILD
+    assert tree["right_children"][1] != LEAF_CHILD
+
+    margin = walk_margin([tree], np.float32(0.0), [0.0])
+    assert _bits(margin) == _bits(np.float32(0.25))
+
+    # The same tree read the other way reaches a different leaf, so the two
+    # tests are genuinely distinguishable here and the assertion above is not
+    # passing for want of a difference to find.
+    assert _bits(np.float32(tree["node_values"][2])) != _bits(np.float32(0.25))
 
 
 def test_the_walk_returns_a_float32() -> None:

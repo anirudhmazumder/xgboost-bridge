@@ -38,10 +38,18 @@ pip install "xgboost-bridge[export]"
 ```
 
 The base package's floor is Python `>=3.10` — reading an artifact and
-predicting from it needs nothing but `numpy`. The `export` extra pulls in
-`xgboost>=3.3,<4`, which requires `>=3.12`, so installing the base package
-on 3.10 or 3.11 works fine but installing the `export` extra there will fail
-to resolve. That is XGBoost's floor, not a packaging bug.
+predicting from it needs nothing but `numpy`. The `export` extra pins
+`xgboost==3.3.0`, which requires `>=3.12`, so installing the base package on
+3.10 or 3.11 works fine but installing the `export` extra there will fail to
+resolve. That is XGBoost's floor, not a packaging bug.
+
+The pin is exact rather than a range, and deliberately so. This library
+refuses to export a model produced by an XGBoost version it has not verified
+against, because version drift here is silent — XGBoost 3.4.0-dev relocated a
+field, and 3.3.0 reads such a model returning wrong predictions with no
+warning and exit code 0. A permissive range would resolve a version the
+exporter then refuses, so the dependency and the verified list are kept
+identical. Widening either requires re-probing.
 
 ## Export a model
 

@@ -611,6 +611,30 @@ def test_size_leaf_vector_is_compared_as_a_string_not_an_integer() -> None:
     assert excinfo.value.value == "3"
 
 
+def test_size_leaf_vector_is_checked_on_every_tree_not_only_the_first() -> None:
+    """D037 requires the per-tree check to run for **every** tree.
+
+    ``size_leaf_vector`` lives only in each tree's ``tree_param``, never in
+    ``learner_model_param``, so "check the model" has no referent and the gate
+    has to iterate. A gate that iterated only as far as the first tree would
+    pass every test that edits ``trees[0]`` and every model whose trees all
+    agree -- which is all of them -- while admitting a mixed-arity ensemble.
+    The last tree is edited here precisely because it is the one a truncated
+    loop never reaches.
+    """
+    model = _fit({"objective": "reg:squarederror"}, num_boost_round=3)
+    trees = model["learner"]["gradient_booster"]["model"]["trees"]
+    assert len(trees) >= 3, "the fixture needs more than one tree to say anything"
+    assert trees[0]["tree_param"]["size_leaf_vector"] == "1"
+
+    trees[-1]["tree_param"]["size_leaf_vector"] = "2"
+
+    with pytest.raises(errors.UnsupportedModelShapeError) as excinfo:
+        validate_source_model(model, tested_versions=_tested(model))
+    assert excinfo.value.field == "size_leaf_vector"
+    assert excinfo.value.value == "2"
+
+
 # ---------------------------------------------------------------------------
 # Version ceiling.
 # ---------------------------------------------------------------------------

@@ -20,6 +20,8 @@ import {
   fromJSON,
   loadArtifact,
 } from "../dist/index.js";
+// The whole export surface, for the API-surface checks at the end of this file.
+import * as BUNDLE from "../dist/index.js";
 
 const SCRATCH = new DataView(new ArrayBuffer(4));
 
@@ -531,6 +533,60 @@ test("there is no fromFile, in any spelling (D006)", () => {
     assert.equal(Predictor[name], undefined, `Predictor.${name} must not exist`);
     assert.equal(Predictor.prototype[name], undefined, `Predictor#${name} must not exist`);
   }
+});
+
+test("the bundle exports no module-level file-reading entry point either (D006)", () => {
+  // The check above covers `Predictor.fromFile` and `Predictor#fromFile`. It
+  // does not cover the spelling a contributor would actually reach for — a
+  // plain exported function beside `fromJSON` — and `index.ts` re-exports
+  // everything `predict.ts` declares, so such a function reaches consumers
+  // with nothing objecting. Measured: adding `export function fromFile` turned
+  // no test red before this one existed.
+  const exported = Object.keys(BUNDLE).sort();
+  assert.ok(exported.includes("fromJSON"), "fromJSON is the only entry point");
+
+  const forbidden = exported.filter((name) => /file|path|fs$|directory|disk/i.test(name));
+  assert.deepEqual(
+    forbidden,
+    [],
+    `the bundle exports a file-reading entry point: ${forbidden.join(", ")}`,
+  );
+  for (const name of ["fromFile", "loadFile", "readFile", "fromPath", "load", "readArtifact"]) {
+    assert.equal(BUNDLE[name], undefined, `the bundle must not export ${name}`);
+  }
+  // The scan is only worth anything if it would fire on the real thing.
+  assert.ok(/file|path|fs$|directory|disk/i.test("fromFile"));
+  assert.ok(/file|path|fs$|directory|disk/i.test("loadArtifactFromPath"));
+});
+
+test("no prediction method mentions `provenance` in its own source (D015)", () => {
+  // The mirror of the `objective` check above, for the other non-operative
+  // field. `provenance.base_score` holds the value XGBoost stored *unclamped
+  // and untransformed*, so anything derived from it on a prediction path is
+  // wrong by up to 13.8 in margin space (D035). The artifact carries exactly
+  // one operative numeric intercept and this is not it.
+  for (const name of ["margin", "output", "walk", "featureRow"]) {
+    const method = Predictor.prototype[name];
+    assert.equal(typeof method, "function", `Predictor.prototype.${name} is missing`);
+    for (const token of ["provenance", "base_score", "exporter_version", "xgboost_version"]) {
+      assert.ok(
+        !method.toString().includes(token),
+        `Predictor.prototype.${name} references \`${token}\``,
+      );
+    }
+  }
+
+  // And the behavioural half, since a source scan can be evaded: the block is
+  // replaced after loading, so its load-time validation still ran on the real
+  // value, and every number must be bit-identical afterwards.
+  const predictor = fromJSON(WORKED_EXAMPLE);
+  const row = { feature_a: 0.25, feature_b: 9.0 };
+  const before = [bits32(predictor.margin(row)), bits32(predictor.output(row))];
+  Object.defineProperty(predictor, "provenance", {
+    value: { base_score: "corrupted", exporter_version: "corrupted", xgboost_version: "corrupted" },
+    configurable: true,
+  });
+  assert.deepEqual([bits32(predictor.margin(row)), bits32(predictor.output(row))], before);
 });
 
 test("fromJSON takes a parsed object and never a string or a path", () => {
