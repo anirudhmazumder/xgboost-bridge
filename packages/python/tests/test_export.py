@@ -21,6 +21,7 @@ This is called out again in the final report for review.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
 import re
@@ -342,15 +343,50 @@ def test_the_export_extra_pins_exactly_the_enumerated_version_ceiling() -> None:
     )
 
 
+def _load_policy():
+    """The shared historical-record exemption. See ``_policy`` for the rule.
+
+    Loaded by path because pytest runs under ``--import-mode=importlib``. The
+    vocabulary scrub loads the same module the same way, so the exemption has one
+    definition and the two prose checks cannot drift apart -- which they did,
+    within a single commit, before this module existed.
+    """
+    path = Path(__file__).resolve().with_name("_policy.py")
+    spec = importlib.util.spec_from_file_location("_xgboost_bridge_test_policy", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_POLICY = _load_policy()
+
 #: User-facing documents. A reader decides what to install from these, so a version
 #: specifier stated here is a claim about the manifest and is pinned to it below.
-#: ``docs/DECISIONS.md`` and ``probes/`` are deliberately excluded -- both are
-#: historical records that must be free to quote a specifier that was withdrawn.
+#: The historical record is exempt -- a decision entry and a probe transcript must
+#: stay free to quote a specifier that was withdrawn. That exemption is not
+#: restated here; it comes from ``_policy`` and is asserted disjoint below.
 USER_FACING_DOCS = (
     Path("COMPAT.md"),
     Path("README.md"),
     Path("packages") / "python" / "README.md",
 )
+
+
+def test_the_pinned_documents_are_not_part_of_the_historical_record() -> None:
+    """The two prose checks share one exemption, and this is where they meet.
+
+    Without this, ``USER_FACING_DOCS`` is an independent allow-list that happens
+    to agree with the scrub's exemption today. Adding ``docs/DECISIONS.md`` to it
+    would make the specifier check demand that a historical entry be edited to
+    match the current manifest -- the exact inconsistency ``_policy`` was written
+    to settle -- and nothing would have objected.
+    """
+    overlap = [str(doc) for doc in USER_FACING_DOCS if _POLICY.is_historical_record(doc)]
+    assert not overlap, (
+        "a document cannot be both pinned to the current manifest and exempt as a "
+        f"historical record: {overlap}"
+    )
 
 #: ``xgboost`` followed by a PEP 440 operator and a version, in prose or a fenced
 #: block: ``xgboost==3.3.0``, ``xgboost>=3.3,<4``.
@@ -449,6 +485,7 @@ def test_export_is_byte_identical_across_two_calls_in_the_same_process() -> None
 
 _SUBPROCESS_TRAINING_SCRIPT = """
 import hashlib
+import importlib.util
 import numpy as np
 import xgboost as xgb
 from xgboost_bridge import export
