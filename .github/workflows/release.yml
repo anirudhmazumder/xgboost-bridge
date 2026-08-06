@@ -58,10 +58,45 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # The Python suite collects the cross-language parity harness, which
+      # shells out to `node` and refuses to measure against a `dist/` older
+      # than `src/`. Node and a fresh bundle therefore have to exist before
+      # pytest runs, exactly as in the CI workflow.
+      - name: Set up Node.js 20
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Install JavaScript dependencies
+        working-directory: packages/js
+        run: npm ci
+
+      - name: Build the JavaScript bundle (required by the parity harness)
+        working-directory: packages/js
+        run: npm run build
+
       - name: Install uv and Python 3.12
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           python-version: "3.12"
+
+      - name: Sync workspace (packages/python, fixtures)
+        run: uv sync
+
+      # The same verification the CI workflow runs, repeated here rather than
+      # trusted from a prior job -- a publish workflow that skips its own
+      # checks because "CI already passed" is trusting a different commit's
+      # result for this one. The JavaScript publish job below has always done
+      # this; the Python job did not, and an untested wheel is the artifact
+      # that cannot be withdrawn.
+      - name: Run Python test suite
+        run: uv run pytest
+
+      # The wheel a user receives, exercised as an installed package from
+      # outside the repository, before it can be uploaded. The source tree
+      # passing says nothing about the distribution.
+      - name: Verify the built distribution installs and predicts
+        run: ./tools/clean_install_python.sh
 
       - name: Build sdist and wheel
         run: uv build packages/python --out-dir dist
@@ -93,7 +128,7 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       # Same three checks the CI workflow runs, repeated here rather than
       # trusted from a prior job: a publish workflow that skips its own
@@ -107,6 +142,14 @@ jobs:
 
       - name: Run JavaScript test suite
         run: npm run test:nobuild
+
+      # The tarball a user receives, exercised as an installed package from
+      # outside the repository, before it can be uploaded. Symmetric with the
+      # Python job above: the source tree passing says nothing about the
+      # distribution, and an npm version number cannot be reused once taken.
+      - name: Verify the packed tarball installs and predicts
+        working-directory: ${{ github.workspace }}
+        run: ./tools/clean_install_js.sh
 
       - name: Publish to npm (with provenance)
         run: npm publish --access public --provenance

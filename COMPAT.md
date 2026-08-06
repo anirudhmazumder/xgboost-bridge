@@ -180,10 +180,15 @@ does not defend against it. An untested version is therefore treated as an
 unrecognized input, refused by the version marker check, independent of
 whether unrecognized-field detection would also have caught it.
 
-The Python `export` extra's dependency spec currently allows
-`xgboost>=3.3,<4` (see `packages/python/pyproject.toml`); that is what
-pip/uv will resolve, not a compatibility claim. The compatibility claim is
-the enumerated list above.
+The Python `export` extra pins `xgboost==3.3.0` exactly (see
+`packages/python/pyproject.toml`); that is what pip/uv will resolve. The
+specifier equals the enumerated list above rather than bounding it, and
+that is deliberate: a range admits versions this project has not probed,
+and the exporter refuses any producing version outside the enumerated
+ceiling. A range specifier shipped here once and was a defect — a clean
+install resolved a version above the ceiling and the first `export_model`
+call raised `UnsupportedVersionError` (D051). Widening the pin requires a
+probe, not an edit here.
 
 ## Two Python floors
 
@@ -195,7 +200,7 @@ they exist for different reasons: (D013)
   supports 3.10, so reading an exported artifact and running the reference
   predictor work on 3.10+.
 - The **workspace root and the fixture package** declare `requires-python =
-  ">=3.12"`, and the `export` extra depends on `xgboost>=3.3,<4`, which
+  ">=3.12"`, and the `export` extra depends on `xgboost==3.3.0`, which
   itself requires Python `>=3.12`.
 
 **The resolver failure this causes if you miss it:** installing the base

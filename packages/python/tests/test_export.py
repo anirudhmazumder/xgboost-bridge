@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import subprocess
 import sys
 import tomllib
@@ -338,6 +339,70 @@ def test_the_export_extra_pins_exactly_the_enumerated_version_ceiling() -> None:
     assert sorted(declared) == expected, (
         "the export extra and the enumerated version ceiling disagree: "
         f"{sorted(declared)} against {expected}"
+    )
+
+
+#: User-facing documents. A reader decides what to install from these, so a version
+#: specifier stated here is a claim about the manifest and is pinned to it below.
+#: ``docs/DECISIONS.md`` and ``probes/`` are deliberately excluded -- both are
+#: historical records that must be free to quote a specifier that was withdrawn.
+USER_FACING_DOCS = (
+    Path("COMPAT.md"),
+    Path("README.md"),
+    Path("packages") / "python" / "README.md",
+)
+
+#: ``xgboost`` followed by a PEP 440 operator and a version, in prose or a fenced
+#: block: ``xgboost==3.3.0``, ``xgboost>=3.3,<4``.
+_DOC_SPECIFIER_RE = re.compile(
+    r"xgboost\s*(?:==|>=|<=|~=|!=|>|<)\s*[0-9][0-9A-Za-z.*+!-]*"
+    r"(?:\s*,\s*(?:==|>=|<=|~=|!=|>|<)\s*[0-9][0-9A-Za-z.*+!-]*)*",
+    re.IGNORECASE,
+)
+
+
+def test_user_facing_docs_state_the_same_xgboost_specifier_as_the_manifest() -> None:
+    """Prose that contradicts the manifest is the defect this pins.
+
+    ``COMPAT.md`` told a reader the export extra allowed ``xgboost>=3.3,<4`` and
+    pointed at ``packages/python/pyproject.toml`` to confirm it, for the whole
+    period after D051 pinned that manifest to ``xgboost==3.3.0``. The range it
+    named is the exact specifier D051 records as a shipped defect. Every
+    executable check passed the entire time: the test above pins the manifest,
+    and nothing pinned the sentence describing it.
+
+    So the same comparison is made against the prose. A specifier written in a
+    user-facing document must equal the one a user would actually resolve.
+
+    **What this does not catch, stated rather than implied:** a bare version
+    named without an operator ("XGBoost 3.4 is supported") is prose this regex
+    does not read, and a document that omits the specifier entirely cannot
+    disagree with anything. This closes the contradiction case, not every way a
+    document can mislead.
+    """
+    manifest = tomllib.loads(
+        (REPO_ROOT / "packages" / "python" / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    declared = manifest["project"]["optional-dependencies"]["export"]
+    assert len(declared) == 1, f"expected a single export requirement, got {declared}"
+    canonical = declared[0].replace(" ", "")
+
+    findings: list[str] = []
+    scanned = 0
+    for relative in USER_FACING_DOCS:
+        path = REPO_ROOT / relative
+        assert path.is_file(), f"user-facing document is missing: {relative}"
+        scanned += 1
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            for match in _DOC_SPECIFIER_RE.finditer(line):
+                stated = match.group(0).replace(" ", "").replace("`", "")
+                if stated.lower() != canonical.lower():
+                    findings.append(f"{relative}:{lineno}: states {stated!r}")
+
+    assert scanned == len(USER_FACING_DOCS)
+    assert not findings, (
+        f"user-facing documentation contradicts the manifest ({canonical!r}):\n"
+        + "\n".join(findings)
     )
 
 
