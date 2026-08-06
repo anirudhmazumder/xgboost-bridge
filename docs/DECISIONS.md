@@ -1085,4 +1085,4 @@ and how many values each log route matches — now report those counts and asser
 signature instead. The counts are properties of a libm, and pinning them is what made the
 tests darwin-only.
 
-Python suite 960 → 976.
+Python suite 960 → 976 for this change, and 977 with the concurrently-merged audit work of D052.

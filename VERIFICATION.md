@@ -18,7 +18,7 @@ The distinction that matters most: **agreement between this library's two predic
 | Python ↔ JavaScript agreement | each other, on bit patterns | **exactly `0.0`**, at two measurement points |
 | Artifact shape | JSON Schema, draft 2020-12 | all 23 fixtures validate |
 
-Test suites: **962** Python, **112** Node. No skipped tests, no `xfail`.
+Test suites: **977** Python, **112** Node. No skipped tests, no `xfail`.
 
 ---
 
@@ -61,6 +61,8 @@ The generated rows are adversarial rather than uniform, because uniform rows can
 
 Sensitivity was confirmed at that scale: injecting a single ULP into one row of 100,004 produces exactly one margin mismatch.
 
+The 299-row corpus is measured on **both** platforms in CI and is `0.0` on each. The 100,004-row run is a local harness and has only been measured on darwin/arm64 — it is the same code path over more rows, not a different check.
+
 ### Row counts: 289 and 299 are both correct
 
 289 is the number of corpus rows carrying XGBoost ground truth — the denominator for correctness against XGBoost. 299 adds 10 rows carrying `±inf` feature values, which deliberately have **no** ground truth, because XGBoost itself answers them two different ways (it raises through `DMatrix` and treats them as ordinary comparable values through `inplace_predict`). Those 10 still count for cross-language agreement, because agreeing on *refusing* an input is as much a property as agreeing on a value.
@@ -81,7 +83,7 @@ Refusing loudly is a feature. Each refusal exists because the alternative is a p
 | Early-stopped models with an ambiguous tree count | The effective count is not a property of the model: the same file answers differently loaded as a `Booster` versus through the scikit-learn estimator, diverging by `1.55`, with no field distinguishing them |
 | XGBoost versions outside the tested list | Version drift here is silent — 3.4.0-dev relocated a field, and 3.3.0 reads such a model returning **0 of 400 rows correct at max error 1.26, with no warning and exit code 0** |
 | `±inf` feature values | Upstream is itself inconsistent, as above |
-| Non-finite derived intercepts | Reachable and silent: Cox at `base_score=0.0` derives `-inf`, and at any negative value `NaN`, both accepted by XGBoost without complaint |
+| Non-finite intercepts | Reachable and silent: Cox at `base_score=0.0` gives `-inf`, and at any negative value `NaN`, both accepted by XGBoost without complaint |
 
 `NaN` is **not** refused. It is the missing value, and it routes by the tree's default direction.
 
@@ -95,7 +97,19 @@ The honest limits. Read this before relying on the numbers above in an environme
 
 **darwin/arm64** — CPython 3.12.8, numpy 2.5.1, XGBoost 3.3.0, Node 20.19.0 / 24.7.0 / 24.18.0. The installed wheel was additionally exercised at the declared floor, Python 3.10.20 with numpy 1.24.4, on that same machine.
 
-CI now also runs on **linux/x86_64** (glibc 2.39, CPython 3.12.3). The reasoning for why these results carry across platforms was:
+CI now also runs on **linux/x86_64** — glibc 2.39, CPython 3.12.3, numpy 2.5.1, XGBoost 3.3.0, Node 20. Confirmed there, not inferred:
+
+| Check | linux/x86_64 | darwin/arm64 |
+|---|---|---|
+| Python suite | **977 passed** | 977 passed |
+| Node suite | **112 passed** | 112 passed |
+| Margin parity, Python ↔ JavaScript | **exactly `0.0`** | exactly `0.0` |
+| Output parity, Python ↔ JavaScript | **exactly `0.0`** | exactly `0.0` |
+| Rows compared | 299 (289 valued, 10 refused by both) | 299 |
+| Wheel installs from a clean environment and predicts | **yes** | yes |
+| npm tarball installs from a clean project and predicts | **yes** | yes |
+
+The reasoning for why these results were *expected* to carry across platforms was:
 
 - The float32 arithmetic is built only from `+ − × ÷` and exact powers of two, all of which IEEE-754 requires to be correctly rounded. Those cannot vary by platform.
 - The transform calls no `libm`, which is the one component that demonstrably *does* vary by platform.
@@ -142,7 +156,7 @@ Every empirical claim above traces to a report under [`probes/`](probes/) — 11
 
 ```bash
 uv sync                                    # Python workspace
-uv run pytest                              # 962 tests, including the parity harness
+uv run pytest                              # 977 tests, including the parity harness
 uv run python parity/run_parity.py         # cross-language agreement, both points
 
 npm --prefix packages/js install
