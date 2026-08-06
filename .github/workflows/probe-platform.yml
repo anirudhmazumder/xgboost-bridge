@@ -1,0 +1,54 @@
+name: Platform probe
+
+# Every number in VERIFICATION.md was measured on darwin/arm64. This workflow is
+# the only way this repository can obtain a measurement on anything else, and the
+# project's whole method is measurement rather than argument -- so it is a
+# permanent, manually-dispatched job rather than a throwaway.
+#
+# It runs a probe script from probes/ unchanged and prints bit patterns. Diff its
+# output against the same script's output on another platform; that diff is the
+# finding. It asserts nothing and cannot fail the build, which is deliberate: a
+# probe that enforces an expectation cannot report a surprise.
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "Probe script under probes/ to run"
+        required: true
+        default: platform_log_probe.py
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Run a probe on linux/x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install uv and Python 3.12
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          python-version: "3.12"
+
+      - name: Sync workspace
+        run: uv sync
+
+      # The script name is validated against the actual directory listing rather
+      # than interpolated into the shell, so a dispatch input cannot become
+      # arbitrary command text.
+      - name: Run the probe
+        env:
+          PROBE_SCRIPT: ${{ inputs.script }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "probes/$PROBE_SCRIPT" ]; then
+            echo "No such probe script: probes/$PROBE_SCRIPT"
+            echo "Available:"
+            ls probes/*.py
+            exit 1
+          fi
+          uv run python "probes/$PROBE_SCRIPT"
