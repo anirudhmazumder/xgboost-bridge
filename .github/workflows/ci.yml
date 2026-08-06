@@ -46,7 +46,7 @@ jobs:
 
       - name: Install JavaScript dependencies
         working-directory: packages/js
-        run: npm install
+        run: npm ci
 
       - name: Build the JavaScript bundle (required by the parity harness)
         working-directory: packages/js
@@ -91,7 +91,7 @@ jobs:
           node-version: "20"
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       # Zero JS runtime dependencies is non-negotiable (D009). Assert it
       # numerically rather than assuming package.json was never edited.

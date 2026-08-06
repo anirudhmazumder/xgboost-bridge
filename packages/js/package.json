@@ -3,6 +3,15 @@
   "version": "0.1.0",
   "description": "Zero-dependency XGBoost inference for browser, edge, and Node runtimes.",
   "license": "MIT",
+  "author": "Anirudh Mazumder",
+  "keywords": [
+    "xgboost",
+    "inference",
+    "predictor",
+    "gradient-boosting",
+    "zero-dependency",
+    "edge"
+  ],
   "type": "module",
   "types": "./dist/index.d.ts",
   "main": "./dist/index.cjs",
@@ -46,6 +55,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/anirudhmazumder/xgboost-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/anirudhmazumder/xgboost-bridge/issues"
   },
   "homepage": "https://github.com/anirudhmazumder/xgboost-bridge#readme"
 }
