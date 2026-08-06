@@ -820,4 +820,113 @@ Completeness was kept over a bounded sample. Measured: 1000 trees at depth 6, **
 
 ### Findings recorded but not fixed
 
-Deliberately deferred, each with a reason: the **JSON Schema enforces roughly a third of what FORMAT.md §13 requires** (10 of 11 wrong-but-well-formed artifacts validate) — both shipped readers reject 10 and 9 of those respectively, so no wrong number reaches a consumer through them, but a third party validating against the published schema and then walking the artifact themselves is exposed. The **generators' self-checks never run in CI**, including the transform's independent mpmath oracle; the corpus was verified to regenerate byte-identically, so nothing is currently wrong, but a future divergence would not be caught. The **vocabulary scrub misses camelCase mid-identifier** (`getPatientCount`, `numPatients`, `churnRate` all slip) though its own comment claims that coverage. `dist/index.cjs` is **never executed by any test** — it works, verified by hand, but nothing would notice if it stopped. Both **`Predictor` classes are mutable at runtime** while their docstrings imply otherwise. `_version.py` and the Python manifest carry **two unlinked version literals**, so a one-sided bump would silently mislabel the provenance of every artifact from that release.
+Deliberately deferred, each with a reason: the **JSON Schema enforces roughly a third of what FORMAT.md §13 requires** (10 of 11 wrong-but-well-formed artifacts validate) — both shipped readers reject 10 and 9 of those respectively, so no wrong number reaches a consumer through them, but a third party validating against the published schema and then walking the artifact themselves is exposed. The **generators' self-checks never run in CI**, including the transform's independent mpmath oracle; the corpus was verified to regenerate byte-identically, so nothing is currently wrong, but a future divergence would not be caught. The **vocabulary scrub's camelCase blind spot is fixed** — see D052; it was listed here as deferred and is no longer. `dist/index.cjs` is **never executed by any test** — it works, verified by hand, but nothing would notice if it stopped. Both **`Predictor` classes are mutable at runtime** while their docstrings imply otherwise. `_version.py` and the Python manifest carry **two unlinked version literals**, so a one-sided bump would silently mislabel the provenance of every artifact from that release.
+
+## D052 — Independent-worktree audit: what an outside reader found that no internal check could
+
+*2026-08-06*
+
+An audit ran from a separate worktree against `7229719`, deliberately not starting from
+this repository's own vocabulary scrub or `DECISION_COVERAGE.md` — both were written by
+the system that wrote the code, so both encode its blind spots. Six items were acted on.
+The pattern connecting most of them is that **the executable checks were correct and the
+prose around them was not**, which is D022's failure mode one level out: the record made
+it look handled.
+
+### The schema `$id` named a domain nobody owned
+
+`schema/xgboost-bridge-v1.schema.json` declared `$id: https://xgboost-bridge.dev/...`.
+That domain returns NXDOMAIN. A JSON Schema `$id` is an identifier and is not required to
+resolve, so nothing broke and no test could fire — but the repository is public, and an
+unregistered domain in a published schema is registrable by anyone, who could then serve a
+different document at this project's canonical identifier.
+
+Moved to `https://raw.githubusercontent.com/anirudhmazumder/xgboost-bridge/main/schema/…`,
+which is bound to the account that holds the repository. Pinned by
+`test_schema::test_schema_id_is_hosted_where_the_project_actually_controls_the_namespace`,
+on the host prefix rather than the exact string so the path stays free to change with the
+format version.
+
+### `COMPAT.md` documented a withdrawn defect as current behaviour
+
+`COMPAT.md` stated in two places that the export extra allowed `xgboost>=3.3,<4`, and told
+the reader to check `packages/python/pyproject.toml` to confirm it. The manifest says
+`xgboost==3.3.0`. The range named is the *exact specifier D051 records as a shipped
+defect* — the one that resolved 3.4.0 and made the first `export_model` call raise.
+`packages/python/README.md` had it right, so the two user-facing documents contradicted
+each other, and a reader following COMPAT.md's own instruction to verify would have found
+the opposite of what it claimed.
+
+**Why every check passed for the whole period:**
+`test_the_export_extra_pins_exactly_the_enumerated_version_ceiling` pins the manifest.
+Nothing pinned the sentence describing the manifest. D051 fixed the code and the decision
+record, and left the compatibility document stating the defect.
+
+So the prose is pinned too, by the same comparison:
+`test_export::test_user_facing_docs_state_the_same_xgboost_specifier_as_the_manifest`
+reads every PEP 440 specifier in `COMPAT.md`, `README.md` and `packages/python/README.md`
+and requires it to equal what the manifest declares. `docs/DECISIONS.md` and `probes/` are
+excluded on purpose — a historical record has to stay free to quote a specifier that was
+withdrawn, which is what this very entry does.
+
+The test's docstring states what it does **not** catch, rather than implying completeness:
+a bare version named without an operator is prose it does not read. That limit is written
+down because the finding below is what happens when a check's description outruns it.
+
+### The vocabulary scrub overstated its own coverage
+
+The guard was `(?<![A-Za-z])` — not preceded by a letter. Correct for a term at the start
+of an identifier segment or after an underscore, and structurally blind to one in the
+middle of a camelCase identifier, where the preceding character is *always* a letter.
+Measured against the real compiled patterns, four such spellings passed a clean scrub —
+a domain noun behind a `get`/`num`/`load` prefix, and an ambiguous term followed directly
+by a capitalised suffix. Worse, the comment above `AMBIGUOUS_IDENTIFIER_RE` cited that
+last form as covered while the pattern required a `_` or `-` separator and could not match
+it. The concrete spellings are in `must_flag`, which is the one place they belong.
+
+**A check that claims coverage it does not have is worse than one that admits a gap**, and
+this one was documented as a known limitation under "Findings recorded but not fixed" —
+which is how it survived. A recorded gap reads as a managed gap.
+
+Fixed with a second, case-**sensitive** entry form: preceded by a lowercase letter or
+digit, term capitalized, so a real camelCase hump matches and ordinary English does not.
+The case sensitivity is load-bearing — a global `re.IGNORECASE` would make the capitalized
+alternation match a lowercase run and flag `impatient`, the exact false positive D029 says
+teaches reviewers to ignore the check. Both are pinned in
+`test_scrub_detects_what_it_claims_to_detect`: six camelCase violations in `must_flag`,
+`impatient` and `reallocation` in `must_not_flag`.
+
+Turning the guard on flagged exactly one line in the repository — the sentence in this
+file that disclosed the gap, which cited the identifiers as examples. **No application
+vocabulary existed then or exists now**; an independent sweep by the auditor found none
+either. The scrub was measuring nothing, correctly, for the wrong reason.
+
+### Publishing asymmetry: one path verified the artifact, the other published it unread
+
+`publish-javascript` re-ran typecheck, build and the suite before publishing, with a
+comment explaining that skipping them because "CI already passed" trusts a different
+commit's result. `publish-python` built a wheel and uploaded it with **no test step at
+all**. The reasoning was written down in one job and not applied to the other.
+
+Both now run their suite, and both now run their clean-install script — the wheel and the
+tarball exercised as installed packages from outside the repository, before upload rather
+than after. A PyPI version and an npm version are each permanent once taken; the source
+tree passing says nothing about the distribution, which is the whole finding of D051.
+
+Both workflows also moved from `npm install` to `npm ci`. A lockfile that is present and
+unenforced lets a publish job resolve dependencies that were never tested.
+
+### Publishing metadata
+
+The Python manifest had no `[project.urls]` and no `authors`, so the PyPI page would have
+carried no link back to the source, the format specification, or the evidence. `authors`
+records a name and no address deliberately: a release is permanent per version and an
+email published to the index cannot be withdrawn from it or from its mirrors.
+
+### Not acted on, and why
+
+The `esbuild` advisory (GHSA-g7r4-m6w7-qqqr) is low severity, reachable only through the
+development server on Windows, and `tsup` is a dev dependency — it is in no shipped
+artifact, and the zero-runtime-dependency count is asserted in CI. The institutional email
+in commit metadata is the owner's to decide and would require a history rewrite on an
+already-public repository.

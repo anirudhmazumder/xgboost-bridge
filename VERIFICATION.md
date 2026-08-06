@@ -18,7 +18,7 @@ The distinction that matters most: **agreement between this library's two predic
 | Python ↔ JavaScript agreement | each other, on bit patterns | **exactly `0.0`**, at two measurement points |
 | Artifact shape | JSON Schema, draft 2020-12 | all 23 fixtures validate |
 
-Test suites: **960** Python, **112** Node. No skipped tests, no `xfail`.
+Test suites: **962** Python, **112** Node. No skipped tests, no `xfail`.
 
 ---
 
@@ -123,7 +123,7 @@ Every empirical claim above traces to a report under [`probes/`](probes/) — 11
 
 ```bash
 uv sync                                    # Python workspace
-uv run pytest                              # 960 tests, including the parity harness
+uv run pytest                              # 962 tests, including the parity harness
 uv run python parity/run_parity.py         # cross-language agreement, both points
 
 npm --prefix packages/js install

@@ -55,29 +55,60 @@ MODELLING_CONTEXT = (
     r"score\w*|rate|probabilit\w*|risk|detect\w*|churn|feature\w*"
 )
 
+_UNAMBIGUOUS_ALT = "|".join(UNAMBIGUOUS)
+_UNAMBIGUOUS_CAP_ALT = "|".join(term.capitalize() for term in UNAMBIGUOUS)
+_AMBIGUOUS_ALT = "|".join(AMBIGUOUS)
+_AMBIGUOUS_CAP_ALT = "|".join(term.capitalize() for term in AMBIGUOUS)
+
 # `\b` is the wrong boundary here: `_` is a word character, so `\bpatient\b` misses
-# `patient_id`, and a trailing `\b` also misses the camelCase `titanicRows`. Instead:
-# not preceded by a letter, and not followed by a LOWERCASE letter. The term itself is
-# matched case-insensitively via a scoped flag so the lookahead stays case-sensitive —
-# a global re.IGNORECASE would make `[a-z]` match `R` and break the camelCase case.
+# `patient_id`. But "not preceded by a letter" is too strong on its own — it is blind
+# to a term in the middle of a camelCase identifier, where the preceding character is
+# always a letter. `getPatientCount`, `numPatients` and `loadPatientData` all passed a
+# scrub built only on that guard, and the guard's own comment claimed otherwise.
+#
+# So two entry forms, deliberately separate:
+#
+#   segment start   not preceded by a letter, term matched case-insensitively —
+#                   `patient`, `patient_id`, `Patient`, `TITANIC`, `titanicRows`
+#   camelCase hump  preceded by a lowercase letter or digit, term Capitalized so the
+#                   hump is real — `getPatientCount`, `numPatients`
+#
+# The hump form must stay case-SENSITIVE. A global `re.IGNORECASE` would make the
+# capitalized alternation match a lowercase run and turn `impatient` into a hit, which
+# is the false positive that teaches reviewers to ignore the check (D029). Scoped
+# `(?i:...)` is therefore used for the case-insensitive part only, never a global flag.
+#
+# A trailing optional `s` catches the plural of a term listed in the singular
+# (`numTumors`), and `(?![a-z])` still stops `patient` from matching inside a longer
+# lowercase word.
 UNAMBIGUOUS_RE = re.compile(
-    r"(?<![A-Za-z])(?i:" + "|".join(UNAMBIGUOUS) + r")(?![a-z])"
+    r"(?:"
+    r"(?<![A-Za-z])(?i:" + _UNAMBIGUOUS_ALT + r")s?(?![a-z])"
+    r"|(?<=[a-z0-9])(?:" + _UNAMBIGUOUS_CAP_ALT + r")s?(?![a-z])"
+    r")"
 )
 
-# Compound identifier form: customer_churn, churnRate, fraud-score.
+# Compound identifier forms, all four of them. The `_`/`-` spellings are
+# case-insensitive; the two camelCase spellings are not, for the reason above.
+#
+#   customer_churn, fraud-score   separator compound, term either side
+#   customerChurn                 hump with the term second
+#   churnRate                     term first, immediately followed by a hump
+#
+# `churnRate` is the case an earlier revision of this comment claimed to cover while
+# the pattern required a separator and did not match it at all.
 AMBIGUOUS_IDENTIFIER_RE = re.compile(
-    r"\b(?:\w+[_-]("
-    + "|".join(AMBIGUOUS)
-    + r")|("
-    + "|".join(AMBIGUOUS)
-    + r")[_-]\w+)\b",
-    re.IGNORECASE,
+    r"(?:"
+    r"(?i:\b(?:\w+[_-](?:" + _AMBIGUOUS_ALT + r")|(?:" + _AMBIGUOUS_ALT + r")[_-]\w+)\b)"
+    r"|(?<=[a-z0-9])(?:" + _AMBIGUOUS_CAP_ALT + r")s?(?![a-z])"
+    r"|(?<![A-Za-z])(?i:" + _AMBIGUOUS_ALT + r")s?(?=[A-Z])"
+    r")"
 )
 
 # Adjacent-word form: "customer churn", "churn prediction".
 AMBIGUOUS_ADJACENT_RE = re.compile(
-    r"\b(?:(?:" + MODELLING_CONTEXT + r")\s+(?:" + "|".join(AMBIGUOUS) + r")"
-    r"|(?:" + "|".join(AMBIGUOUS) + r")\s+(?:" + MODELLING_CONTEXT + r"))\b",
+    r"\b(?:(?:" + MODELLING_CONTEXT + r")\s+(?:" + _AMBIGUOUS_ALT + r")"
+    r"|(?:" + _AMBIGUOUS_ALT + r")\s+(?:" + MODELLING_CONTEXT + r"))\b",
     re.IGNORECASE,
 )
 
@@ -145,6 +176,15 @@ def test_scrub_detects_what_it_claims_to_detect() -> None:
         "churn prediction threshold",
         "readmission risk",
         "def fraud_score(row): ...",
+        # camelCase mid-identifier: the preceding character is a letter, so the
+        # segment-start guard alone is blind to every one of these. Each passed
+        # the scrub before the hump form was added.
+        "def getPatientCount(rows): ...",
+        "const numPatients = rows.length",
+        "loadPatientData(handle)",
+        "const churnRate = 0.2",
+        "const customerChurn = predict(x)",
+        "let numTumors = 0",
     ]
     for sample in must_flag:
         hit = (
@@ -161,6 +201,11 @@ def test_scrub_detects_what_it_claims_to_detect() -> None:
         "score = margin + intercept",
         "feature_names must be unique",
         "rate_drop and skip_drop are dart parameters",
+        # The hump form is case-sensitive on purpose. Under a global IGNORECASE
+        # the capitalized alternation would match this lowercase run and the
+        # scrub would flag ordinary English.
+        "the impatient reader will skip this section",
+        "reallocation of the buffer is not required",
     ]
     for sample in must_not_flag:
         hit = (

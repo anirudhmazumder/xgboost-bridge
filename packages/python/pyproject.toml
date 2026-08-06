@@ -6,7 +6,33 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
+# Name only, no address. A PyPI release is permanent per version, and an email
+# published there cannot be withdrawn from the index or from its mirrors.
+authors = [{ name = "Anirudh Mazumder" }]
+keywords = ["xgboost", "inference", "json", "gradient-boosting", "float32"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 dependencies = ["numpy>=1.24"]
+
+# Without these the PyPI page carries no link back to the source, and a reader
+# has no route to FORMAT.md, the compatibility policy, or the evidence.
+[project.urls]
+Homepage = "https://github.com/anirudhmazumder/xgboost-bridge"
+Repository = "https://github.com/anirudhmazumder/xgboost-bridge"
+Issues = "https://github.com/anirudhmazumder/xgboost-bridge/issues"
+"Artifact format" = "https://github.com/anirudhmazumder/xgboost-bridge/blob/main/FORMAT.md"
+"Compatibility policy" = "https://github.com/anirudhmazumder/xgboost-bridge/blob/main/COMPAT.md"
+"Verification" = "https://github.com/anirudhmazumder/xgboost-bridge/blob/main/VERIFICATION.md"
 
 [project.optional-dependencies]
 # Reading a fitted model requires XGBoost. Prediction and artifact inspection do not.

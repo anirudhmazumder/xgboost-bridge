@@ -82,6 +82,37 @@ def test_schema_declares_draft_2020_12_and_has_an_id() -> None:
     assert isinstance(SCHEMA.get("$id"), str) and SCHEMA["$id"]
 
 
+#: Hosts whose namespace is bound to the repository account itself. A `$id` outside
+#: these is only as trustworthy as whoever holds the domain.
+_ID_ALLOWED_PREFIXES = (
+    "https://raw.githubusercontent.com/anirudhmazumder/xgboost-bridge/",
+    "https://github.com/anirudhmazumder/xgboost-bridge/",
+)
+
+
+def test_schema_id_is_hosted_where_the_project_actually_controls_the_namespace() -> None:
+    """`$id` was `https://xgboost-bridge.dev/...`, a domain nobody had registered.
+
+    An identifier is not required to resolve, so nothing broke and no test could
+    notice. The exposure is ownership, not resolution: the repository is public,
+    so the unregistered domain in a published schema was an open invitation --
+    anyone could register it and serve a *different* document at this project's
+    canonical `$id`, and a consumer dereferencing it would have no signal.
+
+    Pinning the host rather than the exact string leaves the path free to change
+    with the schema version, and still fails the moment `$id` moves somewhere the
+    account behind this repository does not control.
+    """
+    schema_id = SCHEMA["$id"]
+    assert schema_id.startswith(_ID_ALLOWED_PREFIXES), (
+        f"schema $id {schema_id!r} is not under a namespace this project controls; "
+        f"expected one of {_ID_ALLOWED_PREFIXES}"
+    )
+    assert schema_id.endswith(SCHEMA_PATH.name), (
+        f"schema $id {schema_id!r} does not end in this file's name, {SCHEMA_PATH.name!r}"
+    )
+
+
 def test_fixture_corpus_is_non_empty() -> None:
     """A suite that silently found zero fixtures must fail, not pass quietly."""
     assert FIXTURE_ARTIFACTS, f"no fixture artifacts found under {CORPUS_DIR}"
