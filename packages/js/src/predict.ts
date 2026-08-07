@@ -283,6 +283,8 @@ export class Predictor {
    * narrowed to float32 **after every single addition**.
    */
   private walk(values: Float64Array): number {
+    // Seeded with the intercept before any tree, and the intercept is the value
+    // the engine reported rather than one derived here (D004, D053).
     let accumulator = Math.fround(this.intercept);
 
     for (const tree of this.trees) {
@@ -321,6 +323,7 @@ export class Predictor {
           }
         }
       }
+      // Narrowed after every single addition, never once at the end (D004).
       const leafValue = Math.fround(elementAt(tree.nodeValues, node));
       accumulator = Math.fround(accumulator + leafValue);
     }

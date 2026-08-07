@@ -617,10 +617,24 @@ def walk_margin(
                         f"0 or 1 at node {node}",
                         None,
                     )
+            # Both sides cast, strict `<`, equality routes RIGHT (D004). Casting
+            # only the sample value is the version that looks sufficient and cost
+            # 6.6 percentage points of probability on a real row.
+            #
+            # The cast on the *left* is load-bearing only when `feature_value` is
+            # a strongly-typed float64. Under NEP 50 a bare Python float is weak,
+            # so `python_float < np.float32(t)` is evaluated in float32 and an
+            # implementation missing this cast is accidentally correct for that
+            # caller and wrong for one passing an array. Which is why the fixture
+            # generator's probe rows are `np.float64` explicitly: the same input,
+            # spelled two ways, hides or exposes the defect.
             elif np.float32(feature_value) < np.float32(threshold):
                 node = left_children[node]
             else:
                 node = right_children[node]
+        # Narrowed after every single addition (D004). The accumulator was seeded
+        # with the intercept the engine *reported*, never one derived here, because
+        # upstream's own value is not portable across platforms (D053).
         accumulator = np.float32(accumulator + np.float32(node_values[node]))
 
     return accumulator

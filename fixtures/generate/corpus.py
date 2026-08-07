@@ -56,6 +56,7 @@ import numpy as np
 import xgboost as xgb
 
 from xgboost_bridge.export import export_model
+from generate.probe_rows import narrows_onto
 from xgboost_bridge.trees import reachable_nodes, walk_margin
 
 CORPUS_DIR = Path(__file__).resolve().parents[1] / "corpus"
@@ -227,6 +228,8 @@ def _write_fixture(
                 f"walk_margin={computed_bits}); this is a defect to report, not to fix "
                 "by adjusting the expected value"
             )
+
+    _assert_probe_rows_agree_with_xgboost(name, booster, feature_names, trees, intercept)
 
     meta: dict[str, Any] = {
         "name": name,
@@ -873,6 +876,79 @@ def build_all() -> list[dict[str, Any]]:
     """Build and write every fixture in the corpus, returning them in order."""
     return [builder() for builder in _BUILDERS]
 
+
+
+def _assert_probe_rows_agree_with_xgboost(
+    name: str,
+    booster: xgb.Booster,
+    feature_names: list[str],
+    trees: list[dict[str, Any]],
+    intercept: float,
+) -> None:
+    """Re-check the walk on rows the fixture's own rows cannot discriminate.
+
+    **This closes the one door every other guard in this repository leaves open.**
+    Every check downstream treats ``expected_margin`` as ground truth, and it *is*
+    ground truth -- it comes from ``booster.predict()``, never from this
+    repository's walk. But the check above can only fire on rows that
+    *distinguish* a defect, and the corpus rows do not distinguish the
+    highest-value one: reverting the sample-side ``np.float32`` cast in
+    ``walk_margin`` and regenerating the corpus **succeeded**, silently, because
+    every corpus value is already float32-exact.
+
+    So the sequence "change the comparison, regenerate the fixtures, watch
+    everything pass" was reachable. Not because the ground truth was laundered,
+    but because nothing asked XGBoost about an input that could tell.
+
+    The rows built here are that input: for every internal node, a value that
+    rounds *onto* the threshold without equalling it. Narrowed, it compares equal
+    and routes RIGHT; un-narrowed, the below-variant routes LEFT -- a whole
+    subtree of difference. XGBoost is asked directly, so this is an independent
+    oracle rather than a re-derivation.
+
+    Raises:
+        AssertionError: the walk disagrees with XGBoost on a probe row. As above,
+            that is a defect to report, never to fix by adjusting an expectation.
+    """
+    probes: list[list[float]] = []
+    baseline = [0.0] * len(feature_names)
+    for tree in trees:
+        left = tree["left_children"]
+        for node, child in enumerate(left):
+            if child == -1:
+                continue
+            pair = narrows_onto(float(tree["node_values"][node]))
+            if pair is None:
+                continue
+            column = int(tree["split_indices"][node])
+            for value in pair:
+                row = list(baseline)
+                row[column] = value
+                probes.append(row)
+
+    if not probes:
+        # A leaf-only model has no thresholds to probe. Stated rather than passed
+        # over, because "no probes" and "all probes agreed" are different results.
+        print(f"    {name}: no internal nodes, so no probe rows")
+        return
+
+    matrix = xgb.DMatrix(
+        np.asarray(probes, dtype=np.float32), feature_names=feature_names, nthread=1
+    )
+    observed = np.asarray(booster.predict(matrix, output_margin=True), dtype=np.float32)
+    for index, row in enumerate(probes):
+        expected = _bits32(observed[index])
+        computed = _bits32(walk_margin(trees, intercept, np.asarray(row, dtype=np.float64)))
+        if computed != expected:
+            raise AssertionError(
+                f"fixture {name!r}: walk_margin disagrees with XGBoost on a "
+                f"narrows-onto-threshold probe row (row={row!r}, "
+                f"xgboost={expected}, walk_margin={computed}). These rows exist "
+                f"because the fixture's own rows cannot detect a missing float32 "
+                f"narrowing on the sample side of the comparison. This is a defect "
+                f"to report, not to fix by adjusting the expected value."
+            )
+    print(f"    {name}: {len(probes)} narrows-onto probe rows agree with XGBoost")
 
 def main() -> None:
     fixtures = build_all()
