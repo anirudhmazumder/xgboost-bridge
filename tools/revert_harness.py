@@ -74,7 +74,7 @@ REVERTS: tuple[Revert, ...] = (
         old="elif np.float32(feature_value) < np.float32(threshold):",
         new="elif feature_value < np.float32(threshold):",
         pytest_args=("packages/python/tests/test_predict.py", "fixtures/tests"),
-        expect_failing=("test_",),
+        expect_failing=("test_margin_reproduces_the_recorded_xgboost_margin",),
         note=(
             "The highest-value invariant in the repository: casting only the "
             "threshold cost 6.6 percentage points of probability on a real row. "
@@ -89,10 +89,15 @@ REVERTS: tuple[Revert, ...] = (
         file="packages/python/src/xgboost_bridge/trees.py",
         old="elif np.float32(feature_value) < np.float32(threshold):",
         new="elif np.float32(feature_value) < threshold:",
-        pytest_args=("packages/python/tests/test_predict.py", "fixtures/tests"),
-        expect_failing=("test_",),
+        pytest_args=("packages/python/tests/test_walk_margin_narrowing_sites.py",),
+        expect_failing=("test_the_threshold_side_cast_changes_the_route",),
         note=(
-            "Tested separately from the sample side rather than as a pair. "
+            "Green on this harness's first run, and it was a real gap rather than "
+            "a false alarm: every tree the Predictor builds is already narrowed at "
+            "parse time, so inside walk_margin the threshold is already float32 "
+            "and this cast is a no-op on the only path the suite exercised. It is "
+            "load-bearing for a caller passing an un-narrowed tree, which the "
+            "public signature permits. Now pinned by its own test. "
             "CLAUDE.md is explicit that reverting both at once pins neither, "
             "because each can absorb the other's failure."
         ),
@@ -105,7 +110,7 @@ REVERTS: tuple[Revert, ...] = (
         old="values = np.asarray(raw, dtype=np.float32)",
         new="values = np.asarray(raw, dtype=np.float64)",
         pytest_args=("packages/python/tests/test_predict.py",),
-        expect_failing=("test_",),
+        expect_failing=("test_node_values_are_loaded_into_a_read_only_float32_array",),
         note=(
             "The structural half of the invariant. `JSON.parse` and `json.load` "
             "both return float64 unconditionally, and on 104/104 measured "
@@ -121,11 +126,14 @@ REVERTS: tuple[Revert, ...] = (
         file="packages/python/src/xgboost_bridge/trees.py",
         old="accumulator = np.float32(accumulator + np.float32(node_values[node]))",
         new="accumulator = accumulator + np.float32(node_values[node])",
-        pytest_args=("packages/python/tests/test_predict.py",),
-        expect_failing=("test_",),
+        pytest_args=("packages/python/tests/test_walk_margin_narrowing_sites.py",),
+        expect_failing=("test_the_accumulator_is_narrowed_after_every_addition",),
         note=(
             "A float64 sum narrowed once at the end scored 318-2541/5000 "
-            "bit-exact. This is the deviation that looks most harmless."
+            "bit-exact. This is the deviation that looks most harmless. Also green "
+            "on the first run, for the same reason as the threshold side: "
+            "np.float32 + np.float32 stays float32 under NEP 50, so the explicit "
+            "cast does nothing once the tree has been narrowed."
         ),
     ),
     Revert(
@@ -138,7 +146,7 @@ REVERTS: tuple[Revert, ...] = (
         new="""            parents[child] += 1
             if False:""",
         pytest_args=("packages/python/tests/test_validator_gaps.py",),
-        expect_failing=("test_",),
+        expect_failing=("test_extract_trees_refuses_a_shared_child",),
         note=(
             "Two parents pointing at one child was accepted by *both* readers, "
             "which agreed on the margin -- so cross-language parity could never "
