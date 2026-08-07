@@ -441,9 +441,26 @@ jobs:
           # No credential must be configured, or npm sends it instead of doing the
           # OIDC exchange. This is the check that would have named the previous
           # failure immediately.
-          if npm config get //registry.npmjs.org/:_authToken 2>/dev/null | grep -qv '^undefined$'; then
-            echo "FAIL: an npm auth token is configured; Trusted Publishing requires none"
-            npm config get //registry.npmjs.org/:_authToken
+          # Require a CONFIRMED ABSENCE, not the absence of a confirmed presence.
+          # This read `| grep -qv '^undefined$'`, which fails only when it
+          # positively observes a token -- so a config read that errored (stderr
+          # was swallowed) or printed nothing satisfied it, and the publish would
+          # proceed with whatever credential was actually configured, defeating
+          # the OIDC exchange this check exists to protect. Same failure direction
+          # as the deny-list job conditions: the guard failing toward the state it
+          # exists to prevent.
+          #
+          # Fail-closed means npm changing its unset sentinel would cause a
+          # spurious release failure. That is the correct trade for something
+          # gating a credential, and it is a one-line fix; the other direction
+          # publishes with a stale token and says nothing.
+          TOKEN_CONFIG="$(npm config get //registry.npmjs.org/:_authToken 2>&1 || true)"
+          if [ "$TOKEN_CONFIG" != "undefined" ]; then
+            echo "FAIL: expected no npm auth token to be configured."
+            echo "  Trusted Publishing requires npm to find NO credential, so that it"
+            echo "  performs the OIDC exchange instead of sending one."
+            echo "  npm config get //registry.npmjs.org/:_authToken -> ${TOKEN_CONFIG:-<empty>}"
+            echo "  (expected the literal string 'undefined')"
             exit 1
           fi
           if [ -n "${NODE_AUTH_TOKEN:-}" ]; then

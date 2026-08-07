@@ -34,11 +34,29 @@ minted a publishing token at step one, and the gate would still have passed afte
 The fix is structural, exactly as it is for rule 1: put the work and the credential in
 different jobs, so the job that can publish runs nothing that could want to.
 
-Stated generally: **a safeguard placed inside the blast radius of what it guards is not
-a safeguard.** Rule 1 is that statement about *information* — an oracle downstream of
-the defect cannot see it. Rule 2 is the same statement about *authority* — a check
-inside the credential's scope cannot constrain it. When adding either kind of
-protection, name what it is outside of.
+**3. A gate expressed as a deny-list on an enumerated input fails open.** Name the values
+that are permitted, not the ones that are not. Found by D063: both publish jobs were
+gated as `if: inputs.targets != 'npm-only'` and `!= 'pypi-only'`, so *any* value other
+than the one named published — and adding a fourth option to that input would have run a
+real release under a dry-run label. The same shape appeared in the check guarding the npm
+credential, which failed only when it positively *observed* a token, so a config read
+that errored satisfied it.
+
+The tell is the failure direction: **each of these fails toward the state it exists to
+prevent.** A deny-list publishes on an unrecognised input; a presence-check proceeds when
+it cannot see; and the loose prerelease predicate of D063 mis-classified a final release
+as a prerelease, skipping the both-registries requirement that stops a half-published
+release. Fail-closed sometimes costs a spurious refusal — that is the right trade for
+anything gating an irreversible action, and it is always the cheaper failure to diagnose.
+
+Stated generally, across all three: **a safeguard placed inside the blast radius of what
+it guards is not a safeguard, and a safeguard that must recognise the bad case in order
+to fire is not one either.** Rule 1 is that about *information* — an oracle downstream of
+the defect cannot see it. Rule 2 is the same about *authority* — a check inside the
+credential's scope cannot constrain it. Rule 3 is the same about *enumeration* — a check
+that lists what is forbidden cannot constrain what it has not heard of. When adding any
+protection, name what it is outside of, and name what it does when it sees something
+unexpected.
 
 ---
 
