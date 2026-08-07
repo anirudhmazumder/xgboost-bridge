@@ -52,16 +52,31 @@ So both packages build the transform from the four correctly-rounded operations 
 
 Both measurement points — the raw margin, and the final output after the transform — compared as **bit patterns**, never with `==`. (`-0.0 == 0.0` is true in both languages, and they are different values; the corpus contains a fixture whose margin is exactly `-0.0` to catch a comparison that gets this wrong.)
 
-| Corpus | Rows | Margin | Output |
-|---|---|---|---|
-| Fixture corpus | 299 | **0 mismatches** | **0 mismatches** |
-| Generated | **100,004** | **0 mismatches** | **0 mismatches** |
+| Corpus | Rows | Margin | Output | Measured on |
+|---|---|---|---|---|
+| Fixture corpus | 299 | **0 mismatches** | **0 mismatches** | both platforms, in CI |
+| Generated, adversarial | **100,000** | **0 mismatches** | **0 mismatches** | both platforms, in CI |
 
-The generated rows are adversarial rather than uniform, because uniform rows cannot find the defect that matters — **0 of 20,000 random continuous rows** detect an incorrectly-cast float32 comparison. Of the 100,004: **5,828 place a feature value exactly on a `float32` split threshold**, 112 exercise the missing-value path with `NaN`, and 654 carry a subnormal or a value beyond `1e30`. Both languages are fed identical float64 **bit patterns**, so the comparison cannot be a test of two number parsers.
+The generated rows are adversarial rather than uniform, because uniform rows cannot find the defect that matters — **0 of 20,000 random continuous rows** detect an incorrectly-cast float32 comparison. The composition is counted and reported on every run rather than estimated:
 
-Sensitivity was confirmed at that scale: injecting a single ULP into one row of 100,004 produces exactly one margin mismatch.
+| Row class | Count | What it is for |
+|---|---|---|
+| Exactly on a `float32` split threshold | **68,664** | Equality routes RIGHT under a strict `<`. An implementation that casts only one side diverges here and nowhere else |
+| **Narrows onto** a threshold without equalling it | **20,511** | The only class that pins the *sample* side of the cast — see below |
+| The two adjacent `float32` values | 774 | Confirms the routing flips where it should |
+| Format edges — subnormals, `±3.4e38`, past `1e30` | 252 | Where `Math.fround` and `np.float32` could part company |
+| Missing (`NaN`) | 23 | The default-direction path |
+| Fully random | 9,776 | A control, so the run is not exclusively pathological |
 
-The 299-row corpus is measured on **both** platforms in CI and is `0.0` on each. The 100,004-row run is a local harness and has only been measured on darwin/arm64 — it is the same code path over more rows, not a different check.
+Both languages are fed identical float64 **bit patterns** from the same generated file, and the harness checks that rather than assuming it, so the comparison cannot become a test of two number parsers. The generator is seeded, so the 100,000 rows are **identical on both platforms** — the two runs compare the same inputs, not merely the same number of inputs.
+
+**Why the narrows-onto class exists.** A row sitting exactly on a threshold carries a value that is already `float32`-exact, so narrowing the *sample* is a no-op and an implementation that skips it still routes correctly. The rows that catch that are float64 values which round to the threshold without equalling it: narrowed they compare equal and route RIGHT, un-narrowed a value just below routes LEFT — a whole subtree of difference from one missing cast. Reverting `Math.fround` on the sample in the JavaScript walk, the 299-row corpus reports **1** mismatch; this reports **1,279 of 20,000**.
+
+**Two protections this harness does not claim to pin,** because they absorb each other: the parse-time `Float32Array` and the threshold-side `Math.fround`. Reverting *either* alone leaves parity at exactly `0.0`, since each narrows the threshold on its own. They are pinned by direct type assertions instead — the JavaScript suite asserts `node_values` loads into a `Float32Array` and the Python suite asserts its `dtype` — which is the only kind of check that can see a storage type.
+
+Sensitivity is re-confirmed on every run rather than once: a one-ULP injection at **each** measurement point must produce exactly one mismatch, because "0 across 100,000 rows" is also what a silently broken comparator reports.
+
+The two CI platforms also differ in JavaScript engine version — Node 20 on Linux, Node 24 locally — so the `0.0` spans two V8 releases as well as two `libm`s.
 
 ### Row counts: 289 and 299 are both correct
 
@@ -105,7 +120,8 @@ CI now also runs on **linux/x86_64** — glibc 2.39, CPython 3.12.3, numpy 2.5.1
 | Node suite | **112 passed** | 112 passed |
 | Margin parity, Python ↔ JavaScript | **exactly `0.0`** | exactly `0.0` |
 | Output parity, Python ↔ JavaScript | **exactly `0.0`** | exactly `0.0` |
-| Rows compared | 299 (289 valued, 10 refused by both) | 299 |
+| Rows compared, fixture corpus | 299 (289 valued, 10 refused by both) | 299 |
+| Rows compared, generated adversarial | **100,000, `0.0` at both points** | 100,000, `0.0` |
 | Wheel installs from a clean environment and predicts | **yes** | yes |
 | npm tarball installs from a clean project and predicts | **yes** | yes |
 
@@ -144,6 +160,7 @@ A second, smaller difference: for `survival:cox` at a negative `base_score`, XGB
 - The **scikit-learn `XGBClassifier` export path is unmeasured.** The arity checks were verified against `xgboost.train` models only.
 - The **`save_best=True` early-stopping callback is unmeasured.** If it trims the model, export proceeds — which is safe, because a trimmed model is unambiguous — but that is inferred, not observed.
 - The **exact mechanism of the logistic clamp** is undecidable by measurement: an input clamp and an output floor are observationally identical, and an upper clamp is undetectable because both forms give exactly `1.0`. The constant is pinned; the mechanism is not.
+- **A feature value that is finite as float64 but infinite once narrowed is accepted, while an explicitly infinite one is refused.** `1e39` is a legal float64; narrowed to `float32` it is `+inf`, and the walk then compares `inf` against thresholds and routes consistently. Both predictors agree on every such row — the 100,000-row parity run includes them and reports `0` mismatches — so this is not a cross-language defect. But it is an inconsistency in the refusal: `±inf` arriving directly raises, and `1e39` arriving and *becoming* `inf` does not. Python also emits `RuntimeWarning: overflow encountered in cast` on those rows, 1,160 times in the scale run, which the harness counts rather than letting scroll past. Whether such a value should be refused is an open behavioural question, not a resolved one.
 - **Two artifact refusals are impossible in JavaScript.** `format_version: 1.0` is indistinguishable from `1` after `JSON.parse`. The Python reader rejects it; the JavaScript reader cannot.
 
 ### The evidence itself is committed
@@ -158,6 +175,7 @@ Every empirical claim above traces to a report under [`probes/`](probes/) — 11
 uv sync                                    # Python workspace
 uv run pytest                              # 977 tests, including the parity harness
 uv run python parity/run_parity.py         # cross-language agreement, both points
+uv run python parity/run_parity_scale.py   # the same, over ~100,000 adversarial rows
 
 npm --prefix packages/js install
 npm --prefix packages/js run typecheck     # separate from the build, deliberately
