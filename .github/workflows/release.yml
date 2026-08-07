@@ -339,7 +339,20 @@ jobs:
       - name: Publish the packed tarball
         run: |
           set -euo pipefail
-          TARBALL=$(ls dist/*.tgz)
+          # An ABSOLUTE path, and this is not fussiness. `npm publish dist/x.tgz`
+          # does not publish a file: npm parses a bare `a/b` spec as the GitHub
+          # shorthand `github:a/b`, so the first dispatch of this workflow ran
+          #   git ls-remote ssh://git@github.com/dist/xgboost-predictor-1.0.0-rc.2.tgz.git
+          # and died with "Permission denied (publickey)" -- an error naming SSH
+          # keys, from a step that touches no git. Reproduced locally:
+          # `dist/x.tgz` gives `Refusing to fetch "github:dist/x.tgz"`, while
+          # `./dist/x.tgz` and an absolute path both resolve to the file.
+          TARBALL="$(cd dist && pwd)/$(ls dist | grep '\.tgz$')"
+          if [ ! -f "$TARBALL" ]; then
+            echo "FAIL: $TARBALL is not a regular file"
+            ls -l dist
+            exit 1
+          fi
           echo "publishing $TARBALL"
           # No NODE_AUTH_TOKEN. npm exchanges the Actions OIDC token for a
           # short-lived credential, which is why `id-token: write` is declared on
