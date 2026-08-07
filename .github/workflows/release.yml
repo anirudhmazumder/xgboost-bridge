@@ -109,6 +109,7 @@ jobs:
       # publish jobs pin what was built rather than re-deriving it.
       version: ${{ steps.built.outputs.version }}
       npm_version: ${{ steps.built.outputs.npm_version }}
+      npm_tag: ${{ steps.built.outputs.npm_tag }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -191,6 +192,27 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "npm_version=$NPM_VERSION" >> "$GITHUB_OUTPUT"
 
+          # The dist-tag is decided HERE, not in the publish job. That job has no
+          # checkout -- by design, it downloads an artifact and calls the publisher
+          # and nothing else -- so it cannot reach tools/check_dist_tags.mjs. An
+          # earlier version of this computed the tag there anyway and would have
+          # failed on a missing module: the same class of mistake as the three
+          # hardcoded assumptions, made while fixing them.
+          #
+          # It also means the credentialed job computes nothing at all, which is
+          # the shape the trust-domain split is for.
+          if node -e '
+            import("./tools/check_dist_tags.mjs").then((m) => {
+              process.exit(m.isPrerelease(process.argv[1]) ? 0 : 1);
+            });
+          ' "$NPM_VERSION"; then
+            NPM_TAG=rc
+          else
+            NPM_TAG=latest
+          fi
+          echo "npm dist-tag: $NPM_TAG"
+          echo "npm_tag=$NPM_TAG" >> "$GITHUB_OUTPUT"
+
       # A prerelease may target one registry; a final release may not. Without
       # this, `npm-only` on 1.0.0 would put the JavaScript package on npm with no
       # Python counterpart and nothing would say so until someone noticed.
@@ -200,9 +222,16 @@ jobs:
           VERSION="${{ steps.built.outputs.version }}"
           NPM_VERSION="${{ steps.built.outputs.npm_version }}"
           echo "python $VERSION, npm $NPM_VERSION, targets ${{ inputs.targets }}"
+          # From the tested module, not a regex inlined here. This was the third
+          # definition of "prerelease" in this pipeline and the loosest: it matched
+          # any version *containing* `a` or `b`. Safe for digits-and-dots releases
+          # and the wrong shape -- a mis-classification lets a final release
+          # publish to one registry only, because the guard would treat it as a
+          # prerelease and skip the both-registries requirement.
           IS_PRERELEASE=$(node -e '
-            const v = process.argv[1];
-            process.stdout.write(/(a|b|rc|alpha|beta|dev)/i.test(v) ? "yes" : "no");
+            import("./tools/check_dist_tags.mjs").then((m) => {
+              process.stdout.write(m.isPrereleasePep440(process.argv[1]) ? "yes" : "no");
+            });
           ' "$VERSION")
           echo "prerelease: $IS_PRERELEASE"
           if [ "$IS_PRERELEASE" = "no" ] && [ "${{ inputs.targets }}" != "both" ]; then
@@ -407,112 +436,68 @@ jobs:
           fi
           echo "no npm credential configured -- OIDC exchange will be used"
 
-          # The dist-tag is DERIVED from the version, not fixed. A hardcoded
-          # `--tag rc` was right for every rehearsal and wrong for a release: it
-          # would put 1.0.0 on the `rc` tag and leave `latest` stranded on
-          # 1.0.0-rc.1 permanently, which is the wrong-version-installed path this
-          # pipeline exists to close.
-          #
-          # Caught by this repository's own test -- "the manifest declares a
-          # prerelease version while the rc tag is in force" -- which went red the
-          # moment the version stopped being a prerelease, before any dispatch.
+          # The tag comes from `verify`, which has the checkout that the tested
+          # predicate needs. This job derives nothing.
           VERSION="${{ needs.verify.outputs.npm_version }}"
-          if node -e 'process.exit(/-(?:rc|alpha|beta)\./.test(process.argv[1]) ? 0 : 1)' "$VERSION"; then
-            TAG=rc
-          else
-            TAG=latest
+          TAG="${{ needs.verify.outputs.npm_tag }}"
+          if [ -z "$TAG" ]; then
+            echo "FAIL: the verify job exported no dist-tag"
+            exit 1
           fi
 
           echo "publishing $TARBALL as $VERSION under dist-tag $TAG"
-          echo "PUBLISHED_TAG=$TAG" >> "$GITHUB_ENV"
           # No NODE_AUTH_TOKEN. npm exchanges the Actions OIDC token for a
           # short-lived credential, which is why `id-token: write` is declared on
           # this job and why the job runs nothing else.
           npm publish "$TARBALL" --access public --provenance --tag "$TAG"
 
-      # ---------------------------------------------------------------------
-      # What the dist-tags actually point at, after the upload. Nothing verified
-      # this, and it is the check that matters most to a consumer: `npm i
-      # xgboost-predictor` resolves `latest`, so a prerelease sitting there is a
-      # silent wrong-version-installed path -- the same class as every other
-      # defect closed in this repository.
-      #
-      # Why it is needed at all: npm sets `latest` UNCONDITIONALLY on a package's
-      # first publish, regardless of `--tag`, and refuses to remove it afterwards
-      # (E400 -- `latest` is protected and every package must have one). Measured
-      # on this package: after a manual `npm publish --tag rc` of 1.0.0-rc.1, both
-      # `rc` AND `latest` pointed at 1.0.0-rc.1. `--tag rc` did work -- the `rc`
-      # tag exists -- it simply does not prevent the bootstrap assignment. So
-      # `latest` cannot be corrected until a non-prerelease version exists, and
-      # this step is what confirms the correction happened when it does (D061).
-      # ---------------------------------------------------------------------
-      - name: Assert the dist-tags point where they should
+      # The tag that was actually passed, handed to the verification job below.
+      # A job output rather than a re-derivation, so the check cannot disagree with
+      # the publish about what it did.
+
+  # ---------------------------------------------------------------------------
+  # What the dist-tags actually point at, after the upload. `npm install <pkg>`
+  # resolves `latest`, so a prerelease sitting there is a silent
+  # wrong-version-installed path.
+  #
+  # A SEPARATE JOB, with no id-token and no credential. It needs a checkout to run
+  # the script, and the publish job deliberately has none -- its whole design is
+  # "download an artifact and call the publisher, and nothing else", so widening it
+  # to fetch the repository would undo the trust-domain split for the sake of a
+  # verification step that requires no authority at all.
+  #
+  # The logic lives in tools/check_dist_tags.mjs, not inline, and that is the fix
+  # for a shape rather than for a bug. The inline version hardcoded `rc` -- correct
+  # while every publish was a release candidate -- so on the 1.0.0 release it waited
+  # six times for `rc` to become `1.0.0`, which could not happen, then reported a
+  # timeout about a release that had already succeeded. The tag *derivation* had a
+  # test and was caught before any dispatch; the *check on the tag* had none,
+  # because one was in a file a test could import and the other was inline YAML.
+  #
+  # It is unit-tested offline against recorded registry responses -- including the
+  # state that existed when this failed, and including the old rule, which the
+  # suite runs against that same input and requires to disagree.
+  # ---------------------------------------------------------------------------
+  verify-dist-tags:
+    name: Assert the npm dist-tags point where they should
+    needs: [verify, publish-javascript]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # no id-token: this job verifies, it cannot publish
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+
+      - name: Check the dist-tags
         env:
-          VERSION: ${{ needs.verify.outputs.npm_version }}
+          PACKAGE_NAME: xgboost-predictor
         run: |
           set -euo pipefail
-          echo "published version: $VERSION"
-
-          # The registry is eventually consistent, so retry rather than fail on a
-          # race that says nothing about the publish.
-          # Wait for THE TAG THAT WAS USED, not for `rc`. The first version of this
-          # loop hardcoded `rc`, because every publish until 1.0.0 was a release
-          # candidate -- so on the real release it waited six times for `rc` to
-          # become 1.0.0, which it never would (the publish used `latest`), and
-          # reported "the rc tag never came to point at 1.0.0" about a release that
-          # had already succeeded. The publish step was green and the verification
-          # step failed: a check whose reach did not match its claim, which is the
-          # class this whole pipeline has been closing.
-          # From the publish step via the environment, so the assertion cannot
-          # disagree with the flag that was actually passed.
-          EXPECTED_TAG="${PUBLISHED_TAG:?the publish step did not record its dist-tag}"
-          TAGS="{}"
-          for attempt in 1 2 3 4 5 6; do
-            TAGS=$(npm view xgboost-predictor dist-tags --json 2>/dev/null || echo "{}")
-            if node -e 'process.exit(JSON.parse(process.argv[1])[process.argv[2]] === process.argv[3] ? 0 : 1)' \
-                 "$TAGS" "$EXPECTED_TAG" "$VERSION"; then
-              break
-            fi
-            if [ "$attempt" = "6" ]; then
-              echo "FAIL: the $EXPECTED_TAG tag never came to point at $VERSION"
-              echo "  dist-tags: $TAGS"
-              exit 1
-            fi
-            echo "not visible yet; waiting 10s"
-            sleep 10
-          done
-
-          echo "dist-tags: $TAGS"
-          node -e '
-            const tags = JSON.parse(process.argv[1]);
-            const version = process.argv[2];
-            const isPre = (v) => /-(?:rc|alpha|beta)\./.test(v || "");
-
-            const expectedTag = process.argv[3];
-            if (tags[expectedTag] !== version) {
-              throw new Error(
-                "the " + expectedTag + " tag is " + tags[expectedTag] + ", expected " + version,
-              );
-            }
-
-            if (isPre(version)) {
-              if (tags.latest === version) {
-                console.log("NOTE: latest also points at the prerelease " + version +
-                  ". That is npm first-publish behaviour and cannot be undone until a" +
-                  " non-prerelease version exists.");
-              } else if (isPre(tags.latest)) {
-                console.log("NOTE: latest points at another prerelease, " + tags.latest + ".");
-              } else {
-                console.log("latest points at " + tags.latest + ", a final release. Correct.");
-              }
-            } else {
-              if (tags.latest !== version) {
-                throw new Error("latest points at " + tags.latest + ", not the just-published " +
-                  version + "; npm i xgboost-predictor would install the wrong version");
-              }
-              if (isPre(tags.latest)) {
-                throw new Error("latest is the prerelease " + tags.latest + " after a final release");
-              }
-              console.log("latest -> " + tags.latest + ", rc -> " + tags.rc + ". Correct.");
-            }
-          ' "$TAGS" "$VERSION" "$EXPECTED_TAG"
+          node tools/check_dist_tags.mjs \
+            "${{ needs.verify.outputs.npm_version }}" \
+            "${{ needs.verify.outputs.npm_tag }}"

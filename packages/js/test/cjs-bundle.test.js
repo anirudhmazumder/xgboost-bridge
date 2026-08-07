@@ -173,9 +173,14 @@ test("release.yml publishes the RC under a non-default dist-tag", () => {
   assert.match(publishLines[0], /--provenance\b/, "the release publish must request provenance");
   assert.match(
     workflow,
-    /TAG=rc[\s\S]{0,120}TAG=latest/,
+    /NPM_TAG=rc[\s\S]{0,200}NPM_TAG=latest/,
     "the tag must be chosen by whether the version is a prerelease",
   );
+  // Derived in `verify`, which has the checkout the tested predicate needs, and
+  // consumed by the publish job -- which derives nothing, because it holds the
+  // credential.
+  assert.match(workflow, /npm_tag: \$\{\{ steps\.built\.outputs\.npm_tag \}\}/);
+  assert.match(workflow, /TAG="\$\{\{ needs\.verify\.outputs\.npm_tag \}\}"/);
 });
 
 test("the dist-tag the workflow would choose matches the manifest version", () => {
@@ -193,23 +198,39 @@ test("the dist-tag the workflow would choose matches the manifest version", () =
     new URL("../../../.github/workflows/release.yml", import.meta.url),
     "utf8",
   );
-  // Reproduce the workflow's own test, so the two cannot drift.
-  const workflowRegex = /\/-\(\?:rc\|alpha\|beta\)\\\.\//;
-  assert.match(workflow, workflowRegex, "the workflow must classify prereleases the same way");
+  // The workflow must not carry its own copy of the predicate. It had four, and
+  // subtly different ones -- which is what let three hardcoded-for-prerelease
+  // assumptions survive until 1.0.0 distinguished them.
+  assert.doesNotMatch(
+    workflow,
+    /\/-\(\?:rc\|alpha\|beta\)/,
+    "the workflow must not inline a prerelease regex; it must call the tested module",
+  );
+  assert.match(
+    workflow,
+    /m\.isPrerelease\(/,
+    "the workflow must classify prereleases through tools/check_dist_tags.mjs",
+  );
 
   assert.equal(
     expected,
     isPrerelease ? "rc" : "latest",
     `version ${manifest.version} should publish under ${expected}`,
   );
-  if (!isPrerelease) {
-    // The case that matters at release time: `latest` must end up on this version.
-    assert.match(
-      workflow,
-      /latest !== version/,
-      "release.yml must assert that latest points at a final release",
-    );
-  }
+  // The dist-tag logic is no longer inline -- it lives in
+  // tools/check_dist_tags.mjs and is unit-tested there against recorded registry
+  // responses. What release.yml must still do is CALL it, in a job that has no
+  // publishing credential.
+  assert.match(
+    workflow,
+    /node tools\/check_dist_tags\.mjs/,
+    "release.yml must verify the dist-tags through the tested script",
+  );
+  assert.match(
+    workflow,
+    /verify-dist-tags:/,
+    "the dist-tag check belongs in its own job: it needs a checkout and no credential",
+  );
 });
 
 test("release.yml passes npm publish an unambiguous path, not a bare relative one", () => {

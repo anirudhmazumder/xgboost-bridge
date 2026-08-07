@@ -1972,3 +1972,82 @@ output patterns, 0 of 3258 node values moved; `exporter_version` changed in 23 o
 that one field removed byte-identical in all 23.
 
 Suites at release: Python **1058**, Node **160**, corpus parity `0.0`, 100,000-row parity `0.0`.
+
+## D063 — Workflow logic moves into a tested module; the sweep found a fourth and fifth copy
+
+*2026-08-07* — **completes D062; adds `RELEASING.md`**
+
+### The assertion is now provable offline
+
+`tools/check_dist_tags.mjs` holds the dist-tag decision as a module with a CLI attached, and
+`packages/js/test/dist-tags.test.js` exercises it against **recorded registry responses** — the
+actual output of `npm view xgboost-predictor dist-tags --json` at each stage of this project's
+releases. No test touches a registry.
+
+Both branches are covered, including the one that had never executed: a final release must own
+`latest` and must not leave a prerelease there. And the **old rule is kept in the module** rather
+than described in a comment, so a test can run it against the exact state that existed when the
+1.0.0 run failed and require the two rules to disagree. A regression test that reimplements the bug
+inside itself proves only that the author remembered it.
+
+Writing those tests corrected my understanding twice, which is the argument for extraction better
+than any I could make in prose:
+
+- Two cases I expected to fail *passed*, because a mismatch on the expected tag is treated as
+  **unsettled** — a propagation race, retried — rather than a verdict. That means the
+  final-release branch is reachable only when a final version is published under a *non-default
+  tag*, which is precisely the D062 publish-step defect. The verdict carries `settled` so a
+  caller can tell "wrong" from "not yet"; a boolean could not.
+- The CLI silently did nothing when run by hand. `import.meta.url` percent-encodes a path — this
+  repository lives under directories with spaces — while `process.argv[1]` carries them
+  literally, so `import.meta.url === \`file://${process.argv[1]}\`` never matched. It would have
+  worked in CI, whose paths have no spaces. Fixed with `pathToFileURL`.
+
+### The sweep: five hardcoded-for-prerelease assumptions, not three
+
+Every one was written when every publish was a release candidate, and 1.0.0 was the first input
+that distinguished them.
+
+| | Where | Caught by |
+|---|---|---|
+| 1 | `--tag rc` in the publish step | This repository's own test, **before any dispatch** |
+| 2 | `rc` in the assertion's retry loop | The 1.0.0 run — a green publish inside a red run |
+| 3 | The `targets` guard requiring `both` | Reasoning about the split-release hazard before dispatching |
+| 4 | A loose `/(a|b|rc|alpha|beta|dev)/i` in that guard | **This sweep** |
+| 5 | A fourth inline `/-(?:rc|alpha|beta)\./` in the tag derivation | **This sweep** |
+
+Four and five are the interesting ones. There were **four** definitions of "prerelease" in one
+file, and they were not identical: the guard's matched any version *containing* `a` or `b`, and
+the tag derivation's lacked a trailing `\d+$` anchor. All four now come from the module, which
+holds one predicate per ecosystem — `isPrerelease` for npm's `1.0.0-rc.1`, `isPrereleasePep440`
+for PyPI's `1.0.0rc1`. They cannot be one regex, because the grammars genuinely differ, but they
+can live in one tested place, and a test asserts they agree about every version this project has
+shipped. A test also forbids the workflow from carrying an inline copy again.
+
+The guard's looseness mattered in the wrong direction: a *mis*-classification there would treat a
+final release as a prerelease and skip the both-registries requirement, which is the half-published
+release the guard exists to prevent.
+
+### And a sixth, made while fixing the others
+
+The first version of this work computed the dist-tag inside `publish-javascript` by importing the
+module — in a job that deliberately has **no checkout**, because its whole design is "download an
+artifact, call the publisher, do nothing else." It would have failed on a missing file.
+
+The tag is derived in `verify` now and passed as a job output. That is better than a repair: the
+credentialed job computes nothing at all, which is the shape the trust-domain split (D054) is for.
+
+**The general rule this yields, and the reason it belongs next to the other two principles:
+anything in a workflow that makes a decision belongs where a test can reach it.** Inline YAML is
+not a testable place. Every defect above was in a decision expressed as shell, and the two that
+were caught cheaply were caught because their *counterparts* had been extracted into files.
+
+### `RELEASING.md`
+
+What a maintainer runs, in what order, what each guard refuses and why, and what to do when it
+fails — including the case that actually happened, where `success / failure` across two publish
+jobs was indistinguishable from a split release and both packages had in fact published. The
+knowledge was in these entries and in one head; the next release may be far enough out that
+neither is available.
+
+Suites: Python 1058, Node 160 → **174**.
