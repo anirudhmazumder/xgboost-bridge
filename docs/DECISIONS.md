@@ -2072,16 +2072,24 @@ Suites: Python 1058, Node 160 → **174**.
 
 ## D064 — The fixture door, the decision index, and a revert harness that found two gaps
 
-*2026-08-07* — **narrows a claim I made in the cold-pickup read; adds a limit to D004 that was previously unstated**
+*2026-08-07* — **amends the revert rule in `CLAUDE.md`; narrows a claim made in the cold-pickup read; adds a limit to D004 that was previously unstated**
 
 Three tools for a maintainer arriving without context, and two findings produced by
 building them. The findings are the substance; the tools are how they surfaced.
 
-### The fixture door was narrower than I described, and still open
+### The fixture door was narrower than described, and still open
 
-I had written that "every guard assumes the fixture is ground truth", implying the
-provenance was the weakness. That was wrong and worth correcting precisely, because
-the real gap was somewhere else. `fixtures/generate/corpus.py` takes
+An earlier reading of this had it that "every guard assumes the fixture is ground
+truth", implying the *provenance* was the weakness. That is wrong, and the correction
+matters more than the original claim did — because the reassuring sentence here is
+**true**, and a true sentence is what lets someone dismiss the concern.
+
+"Our fixtures come from `booster.predict()`, never from our own walk" is accurate.
+The generator additionally re-walks every row and refuses to write a fixture it
+cannot reproduce bit-exactly. Both facts hold. **Neither of them closes the door**,
+and anyone auditing this should be able to see why without rediscovering it: the
+oracle was never the weakness, the *rows* were. Two requirements, and the
+oracle-independence one is the comfortable half. `fixtures/generate/corpus.py` takes
 `expected_margin` from `booster.predict()` and never from `walk_margin`, and it
 already re-walked every row and refused to write a fixture it could not reproduce
 bit-exactly, with the message *"this is a defect to report, not to fix"*.
@@ -2150,13 +2158,23 @@ cast a no-op. This is the absorption `CLAUDE.md` warns about, reached from the o
 direction, and it is **a limit rather than an oversight**: a future edit could remove
 exactly one of the three and nothing here would notice.
 
-Recorded rather than resolved. `CLAUDE.md` says to test each independently *or*
-collapse them to one, and collapsing would delete working protection from a public
-normative function to buy a tidier map — rule 1 (loud failure over silent wrongness)
-outranks that. So all three stay, the harness pins the minimal detectable
-*combination*, and the entry carries an `absorbs` field naming precisely what is not
-pinned. An honest gap in the record beats a green tick that means less than it
-appears to.
+Recorded rather than resolved, and **the rule was amended rather than excepted.**
+`CLAUDE.md` said to test each protection independently *or collapse them to one*.
+The second half is now known to be too strong: it assumed the redundancy was always
+incidental, and here it is structural. Collapsing would delete working protection
+from a public normative function to buy a tidier coverage map — rule 1 (loud failure
+over silent wrongness) outranks rule 6 (one implementation over two).
+
+The rule now reads: **pin the minimal detectable combination and name what remains
+unpinned.** Both statements of it in `CLAUDE.md` — the one under the oracle section
+and the one under rules for changes — carry the supersession inline, so the original
+reasoning stays readable rather than being quietly replaced. An exception buried in a
+decision entry would have left the too-strong rule standing for the next reader to
+follow off a cliff.
+
+So all three narrowings stay, the harness pins the minimal detectable *combination*,
+and the entry carries an `absorbs` field naming precisely what is not pinned. An
+honest gap in the record beats a green tick that means less than it appears to.
 
 One process note, because it is the same lesson: the first draft of the JavaScript
 in-degree revert targeted the saturating-increment guard instead of the `throw`, left

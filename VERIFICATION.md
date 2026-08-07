@@ -170,6 +170,12 @@ A second, smaller difference: for `survival:cox` at a negative `base_score`, XGB
 - The **`save_best=True` early-stopping callback is unmeasured.** If it trims the model, export proceeds — which is safe, because a trimmed model is unambiguous — but that is inferred, not observed.
 - The **exact mechanism of the logistic clamp** is undecidable by measurement: an input clamp and an output floor are observationally identical, and an upper clamp is undetectable because both forms give exactly `1.0`. The constant is pinned; the mechanism is not.
 - **Two artifact refusals are impossible in JavaScript.** `format_version: 1.0` is indistinguishable from `1` after `JSON.parse`. The Python reader rejects it; the JavaScript reader cannot.
+- **The 100,000-row scale parity has only ever run on darwin/arm64.** `parity/run_parity_scale.py` is not part of the CI workflow — CI runs both suites and both clean installs, and the 299-row harness. The scale figure in this document is therefore a one-platform number, which matters more here than it would elsewhere, because the whole point of those rows is that they are the ones capable of exposing a float32 defect. Reproducing it on Linux is the single highest-value unrun measurement in this repository.
+- **One of the accumulator's three narrowings could be removed without any test failing.** Not a gap in coverage that better tests would close — the three sites are mutually absorbing by construction, so no single-site revert is detectable. The minimal detectable combination is pinned and the unpinned members are named in `tools/revert_harness.py` under `absorbs`. See D064.
+
+### CI runs on dispatch, and that is a measurement caveat
+
+Every green result recorded in this document came from an explicit `workflow_dispatch`. **Push-triggered runs arrive late or not at all**, and this has never been reliable on this repository. A reader checking the Actions tab against a recent commit may find nothing there; that is the trigger, not the suite. `gh workflow run ci.yml --ref main` is how every figure here was confirmed.
 
 ### The evidence itself is committed
 

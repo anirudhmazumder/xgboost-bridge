@@ -111,7 +111,17 @@ This is not abstract. An earlier export assertion compared a derived intercept a
 
 - Numerical implementations validate against a **high-precision reference** (`mpmath`, 50 digits), **per side, independently**. Cross-language agreement is a *separate* check and is never evidence of correctness — two identical implementations agreeing proves only that the code was written twice.
 - Export-side assertions validate against **XGBoost's observed output**, never against a re-derivation of the export recipe.
-- Redundant safeguards are untested safeguards. If removing either of two overlapping protections breaks no test, neither is pinned. Test each **independently**, or collapse them to one.
+- Redundant safeguards are untested safeguards. If removing either of two overlapping protections breaks no test, neither is pinned. Test each **independently** where that is achievable; where it is not, **pin the minimal detectable combination and name what remains unpinned.**
+
+  > **Superseded belief:** *"Test each independently, or collapse them to one."* The second half was too strong. It assumed the redundancy was always incidental — that if you cannot separate two protections you should delete one. Measured counterexample: the accumulator's float32 discipline rests on **three** narrowings (the seed, the per-leaf cast, the outer cast) and any one of the three is sufficient alone, so every single-site revert stays green. Collapsing would delete working protection from a public, normative function to buy a tidier coverage map. Naming the gap is more honest than a collapse that pretends the question away. See D064 and the `absorbs` field in `tools/revert_harness.py`.
+
+**An independent oracle asked a non-discriminating question still proves nothing.** These are two requirements, not one, and satisfying the first is the more comfortable half.
+
+The fixture corpus is the worked example, and it matters because the reassuring sentence about it is *true*. "Our fixtures come from `booster.predict()`, never from our own walk" — correct, and the generator additionally re-walks every row and refuses to write a fixture it cannot reproduce bit-exactly. A reader who stops there concludes the corpus cannot launder a defect.
+
+It could. The oracle was never the weakness; **the rows were.** Every value the corpus carried was already exact in float32, so narrowing it is a no-op and an implementation missing the sample-side cast routes all of them correctly. Measured: that cast was reverted, the corpus regenerated, and **generation succeeded silently.** The refusal was real, the ground truth was real, and the question being asked could not distinguish the correct implementation from the broken one.
+
+So when a check is defended on the strength of its oracle, ask the second question too: *which input would fail if the thing under test were wrong?* If there is no answer, the oracle's independence is decoration. The corpus generator now asks XGBoost about 1322 rows that **narrow onto** a threshold without equalling it, and the same revert now fails at generation time. D064; and `fixtures/tests/test_fixture_door.py`, which exists because that probe's own failure mode is silence rather than error.
 
 ### dart and gblinear are refused
 
@@ -179,7 +189,9 @@ A **nonzero parity number means a bit-level defect** — a missing narrowing sit
 - **Never add a dependency** without it being an explicit, separate decision. Zero JS runtime dependencies is absolute.
 - **Never decide a numerical fact by reasoning about what should be true.** If a probe can settle it, run the probe. Every falsified belief in this project was inference that looked sound.
 - **Report ambiguity rather than resolving it silently.** A confident guess about empirical XGBoost behavior propagates into every downstream number.
-- Verify each protection by reverting it **in isolation** and confirming the specific tests go red. This applies **independently to each of the two float32 narrowing sites**, not to the pair — narrowing after every add partially absorbs leaf narrowing, so a suite that reverts both at once pins neither.
+- Verify each protection by reverting it **in isolation** and confirming the specific tests go red. `tools/revert_harness.py` does this mechanically; run it, and treat a revert that turns **nothing** red as a finding rather than a pass. Three things look identical from outside — a test that was renamed away, another site absorbing the failure, and a revert that no longer removes what it claims to. Rule out the third first; it has happened.
+
+  Where a protection genuinely cannot be isolated, **pin the minimal detectable combination and name what remains unpinned** rather than collapsing the redundancy away. The float32 narrowing sites are the worked example and they split two ways: the threshold-side cast in `walk_margin` *is* independently pinnable and was found unpinned, while the accumulator's three narrowings are mutually absorbing by construction and are pinned as a set. Both outcomes are recorded in D064; neither is a licence to revert a pair and call it one test.
 
 ## Commands
 
