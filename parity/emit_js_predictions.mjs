@@ -37,7 +37,7 @@ import { readFileSync } from "node:fs";
 // The one and only module specifier that reaches the package under test.
 const BUNDLE_SPECIFIER = "../packages/js/dist/index.js";
 
-import { fromJSON } from "../packages/js/dist/index.js";
+import { Predictor, fromJSON, loadArtifact } from "../packages/js/dist/index.js";
 
 // One 8-byte scratch buffer, reused. `DataView` is big-endian by default, which
 // is the byte order the hex rendering below assumes on both sides.
@@ -153,12 +153,20 @@ for (const { name, path } of request.fixtures) {
   const fixture = JSON.parse(readFileSync(path, "utf8"));
   const artifact = fixture.artifact;
   const predictor = fromJSON(artifact);
-  // The same artifact with `objective` overwritten after load. No prediction
+  // The same artifact CONSTRUCTED with a different `objective`. No prediction
   // path reads that field (D028), so every bit below must be identical to the
   // untouched predictor's -- a behavioural check on the shipped bundle, run
   // over the whole corpus rather than one hand-built row.
-  const relabelled = fromJSON(artifact);
-  relabelled.objective = request.objective_overwrite;
+  // Constructed rather than mutated after load. The instance is frozen now
+  // (D058), so the old `relabelled.objective = ...` throws -- and the
+  // replacement is stronger regardless: mutating the field after construction
+  // cannot detect a version that reads it *during* construction and caches a
+  // transform, because the cache would already be built and the numbers would
+  // not move. Passing the label in exercises the path where that would show.
+  const relabelled = new Predictor({
+    ...loadArtifact(artifact),
+    objective: request.objective_overwrite,
+  });
   const featureNames = artifact.feature_names;
   fixtures[name] = fixture.rows.map((row) =>
     recordRow(predictor, relabelled, featureNames, rowToInput(featureNames, row)),

@@ -634,7 +634,13 @@ A conforming reader raises — never defaults, never guesses, never skips (D007)
 
 Errors carry structured attributes — which key, which index, what was expected — not only a message string, so a caller can branch on the failure programmatically.
 
-A reader **MUST NOT** raise on a node that is unreachable from the root. Neutralized dead slots are legitimate artifact content (§8.3), they are indistinguishable from a leaf carrying value `0.0`, and the walk never visits them. A reader that rejected unreachable nodes would reject every pruned model.
+A reader **MUST NOT** raise on a node that is unreachable from the root **for being unreachable, or for participating in a cycle among unreachable nodes**. Neutralized dead slots are legitimate artifact content (§8.3), they are indistinguishable from a leaf carrying value `0.0`, and the walk never visits them. A reader that rejected unreachable nodes would reject every pruned model.
+
+> **Corrected, because as first written this contradicted the rule above it (D058).** The unqualified form — "MUST NOT raise on an unreachable node" — cannot hold alongside the requirements two paragraphs up that an out-of-range child index, an out-of-range `split_indices`, and a non-finite `node_values` entry MUST raise. Both cannot be unconditional, and nothing recorded which one won.
+>
+> The narrow reading is normative: **every per-node rule in this section applies to every node, reachable or not.** The only exemption is the cycle-and-tree check, because an unreachable cycle cannot make the walk non-terminating. Both shipped readers already behave this way — measured on five artifacts differing only at an unreachable node, canonical content and an unreachable cycle load, while `split_indices = 2147483647`, an out-of-range child, and `default_left = 7` each raise.
+>
+> A producer neutralizing per §8.3 therefore **MUST** write values that are individually valid at the neutralized node, which is what §8.3's rule already produces. Copying XGBoost's `split_indices = 2147483647` marker through verbatim is *not* conforming, and is refused.
 
 The reader takes a parsed object. There is no `fromFile` in JavaScript (D006): filesystem access is unavailable in browsers and differs across edge runtimes, so a file loader would either add a dependency or split the bundle by runtime. Neither is acceptable against a zero-dependency universal bundle.
 

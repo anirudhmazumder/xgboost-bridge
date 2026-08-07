@@ -128,6 +128,6 @@ for the complete, current list and the evidence behind each refusal.
 
 ## Error messages quote your artifact back
 
-Every exception carries structured attributes — `field`, `value`, `expected`, `index` — and the message embeds the offending value verbatim so the failure is legible. If your artifact or prediction input can be influenced by someone else, **do not pass the message straight into an HTTP response body or an HTML template**: escape it, or branch on the structured attributes and compose your own. Ordinary library behaviour, noted because the attributes exist precisely so you never have to display the string.
+Every exception is an `XGBoostBridgeError` subclass, and most carry structured attributes describing what was wrong — `MalformedTreeError` has `field`, `value`, `expected` and `location`; `NonFiniteFeatureError` has `index` and `value`; `FeatureKeyMismatchError` has `missing_keys` and `extra_keys`. Which attributes exist depends on the exception, so catch the specific class rather than assuming a field is present. The message embeds the offending value verbatim so the failure is legible. If your artifact or prediction input can be influenced by someone else, **do not pass the message straight into an HTTP response body or an HTML template**: escape it, or branch on the structured attributes and compose your own. Ordinary library behaviour, noted because the attributes exist precisely so you never have to display the string.
 
 **AI Disclosure:** Claude Code was used to help implement this project.

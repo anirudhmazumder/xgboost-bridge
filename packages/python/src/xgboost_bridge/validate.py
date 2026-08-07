@@ -191,14 +191,28 @@ def _check_categorical_splits(learner: dict[str, Any]) -> None:
     signals: list[str] = []
     trees = _trees(learner)
 
-    if any(
-        1
-        in _required(
-            tree, "split_type", f"learner.gradient_booster.model.trees[{index}]"
-        )
-        for index, tree in enumerate(trees)
-    ):
-        signals.append("split_type")
+    # Length-checked, then searched. `1 in split_type` over a TRUNCATED array is
+    # a search of the wrong domain: measured on a real 21-node categorical model,
+    # setting `split_type = [0]` and clearing the other two signals made this gate
+    # PASS while `trees.extract_trees` still refused it. `trees.py` carries this
+    # length check with an explicit rationale and a test; the fix was applied in
+    # one of the two modules that read the field. A caller using
+    # `validate_source_model` as their own gate -- which its docstring invites --
+    # got a false pass (D058).
+    for index, tree in enumerate(trees):
+        location = f"learner.gradient_booster.model.trees[{index}]"
+        split_type = _required(tree, "split_type", location)
+        node_count = len(_required(tree, "left_children", location))
+        if len(split_type) != node_count:
+            raise MalformedTreeError(
+                "split_type",
+                len(split_type),
+                f"one entry per node, i.e. {node_count}",
+                location,
+            )
+        if 1 in split_type:
+            signals.append("split_type")
+            break
 
     if any(
         _required(
@@ -234,9 +248,31 @@ def _check_feature_names(learner: dict[str, Any]) -> None:
     """
     feature_names = _required(learner, "feature_names", "learner")
     model_param = _required(learner, "learner_model_param", "learner")
-    num_feature = int(_required(model_param, "num_feature", "learner.learner_model_param"))
+    raw_num_feature = _required(
+        model_param, "num_feature", "learner.learner_model_param"
+    )
+    try:
+        num_feature = int(raw_num_feature)
+    except (TypeError, ValueError):
+        # `num_feature = "1.0"` previously raised a bare ValueError out of a
+        # module documenting that a caller gets "one of the structured exceptions
+        # in xgboost_bridge.errors". The same defect at the same idiom was already
+        # fixed once here, for best_iteration.
+        raise MalformedTreeError(
+            "num_feature",
+            raw_num_feature,
+            "an integer-valued string",
+            "learner.learner_model_param",
+        ) from None
 
-    if not feature_names and num_feature != 0:
+    # Unconditional. FORMAT.md and D021 both say "raise if feature_names is
+    # empty" with no qualifier, but this read `and num_feature != 0` -- so
+    # `feature_names: []` with `num_feature: "0"` passed the whole gate (the
+    # length check below also passes, 0 == 0) and export would emit an artifact
+    # our own reader and our own published schema both refuse. XGBoost declines to
+    # configure a 0-feature learner, so it is unreachable from a real fit, which
+    # is why no test caught it.
+    if not feature_names:
         raise MissingFeatureNamesError(num_feature)
 
     duplicates = tuple(
@@ -278,7 +314,16 @@ def _check_early_stopping(learner: dict[str, Any]) -> None:
     # it is a present value this module refuses to interpret via a bare
     # ``int()`` / list-index crash.
     attributes = learner.get("attributes", {})
-    best_iteration_raw = attributes.get("best_iteration") if isinstance(attributes, dict) else None
+    if not isinstance(attributes, dict):
+        # Absence legitimately means "no refusal needed" and is defaulted above.
+        # A present value of the wrong TYPE is not absence: `attributes` as a list
+        # made this function return None and skip the D038 early-stopping refusal
+        # altogether, which is the silent default this module's own fail-loudly
+        # rule forbids.
+        raise MalformedTreeError(
+            "attributes", type(attributes).__name__, "a JSON object", "learner"
+        )
+    best_iteration_raw = attributes.get("best_iteration")
     if best_iteration_raw is None:
         return
 

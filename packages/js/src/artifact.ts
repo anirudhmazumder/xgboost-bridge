@@ -21,10 +21,22 @@
  * nothing is guessed, nothing is skipped (D007). Two rules cut the other way
  * and are just as load-bearing:
  *
- * - A node **unreachable** from the root does not raise. Neutralized dead slots
- *   are legitimate artifact content (FORMAT.md §8.3), they are indistinguishable
- *   from a leaf carrying `0`, the walk never visits them, and a reader that
- *   rejected them would reject every pruned model.
+ * - A node **unreachable** from the root is exempt from the cycle-and-tree check,
+ *   and from nothing else. Neutralized dead slots are legitimate artifact content
+ *   (FORMAT.md §8.3), they are indistinguishable from a leaf carrying `0`, and the
+ *   walk never visits them — but every per-node rule still applies to them: an
+ *   out-of-range child or `split_indices`, a `default_left` outside `{0,1}`, or a
+ *   non-finite `node_values` entry raises wherever it sits. Measured, on five
+ *   artifacts differing only at an unreachable node: canonical content and a
+ *   cycle among unreachable nodes both load; `split_indices = 2147483647`,
+ *   `left_children = 99` and `default_left = 7` all raise.
+ *
+ *   That is narrower than "does not raise whatever it holds", which is what this
+ *   comment used to say and what FORMAT.md §13 could be read as promising. The
+ *   narrow reading is the correct one: §13 also requires an out-of-range child
+ *   and a non-finite `node_values` entry to raise, and those two requirements
+ *   cannot both be unconditional. A producer must neutralize per §8.3, which
+ *   means writing values that are individually valid (D058).
  * - `objective` is **non-operative metadata** (D028). It is read exactly once,
  *   here, for the cross-check against `output_transform`, and no prediction path
  *   consults it.
@@ -33,8 +45,9 @@
  * reachable from a tree's root. Every child index can be in range and still
  * form a cycle, at which point the walk never terminates — and a
  * non-terminating predictor is a worse outcome for a caller than a raise, since
- * it cannot be caught. The check is confined to the reachable subgraph so that
- * §13's rule about unreachable nodes is untouched.
+ * it cannot be caught. The check is confined to the reachable subgraph because an
+ * unreachable cycle cannot make the walk non-terminating — not because §13
+ * exempts unreachable nodes from everything, which it does not (see above).
  */
 
 import {
@@ -50,13 +63,16 @@ import type { ErrorCode } from "./types.js";
 // Error codes
 // ---------------------------------------------------------------------------
 
-// `ErrorCode` in `types.ts` enumerates five codes and does not yet carry one
-// for a structurally malformed artifact or for a refused feature value. The
-// runtime code strings below are the truthful ones: a caller that switches on
-// `code` reaches its default branch and handles the failure loudly, which is
-// strictly better than being told a malformed tree was an unrecognized field.
-// The single assertion per code is the whole of the type-level debt, and it is
-// confined to these two lines.
+// `ErrorCode` in `types.ts` carries all seven codes, including
+// `MALFORMED_ARTIFACT` and `NON_FINITE_FEATURE`, so a caller can switch on `code`
+// exhaustively and reach a real branch for both.
+//
+// This comment previously said the opposite -- that the union enumerated five and
+// that these two reached a consumer's `default` branch through a type assertion.
+// D048 widened the union; the comment was not updated, and `grep "as ErrorCode"`
+// returns nothing while `tsc --noEmit` is clean, so there is no assertion and no
+// debt. It was telling a reader to handle the two most common failures in a
+// fallback branch.
 
 /**
  * Raised when an artifact contradicts the format this reader was built from.

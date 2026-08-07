@@ -286,6 +286,7 @@ def _validate_child_links(
     (``probes/tree_structure.md`` section 7g).
     """
     node_count = len(left_children)
+    parents = [0] * node_count
     for index in range(node_count):
         left_child = left_children[index]
         right_child = right_children[index]
@@ -316,6 +317,28 @@ def _validate_child_links(
                 f"a different index from left_children at node {index}",
                 location,
             )
+
+        # In-degree, accumulated across the loop. The reader refuses a shared
+        # child (D058); this validator did not, and export's self-check sample
+        # enumerates root-to-leaf PATHS -- which equals the leaf count only for a
+        # tree. Measured on a hand-built forward-pointing diamond chain: 18 nodes
+        # took 0.006s, 26 took 0.265s, 34 took 14.18s, and 60 never returned. So
+        # the consequence here was a HANG inside export_model rather than a wrong
+        # number, and a hang is the one failure a caller cannot catch.
+        for field, child in (
+            ("left_children", left_child),
+            ("right_children", right_child),
+        ):
+            parents[child] += 1
+            if parents[child] > 1:
+                raise _shape_error(
+                    field,
+                    child,
+                    f"a child with exactly one parent; node {child} is reachable "
+                    "from two parents, which makes this a directed acyclic graph "
+                    "rather than a tree",
+                    location,
+                )
 
 
 def _extract_one(source: object, location: str) -> dict[str, Any]:

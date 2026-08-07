@@ -1554,3 +1554,166 @@ All links in all three READMEs re-checked: **0 broken**, counting relative paths
 `blob/main/` URLs against the working tree, and in-document anchors against their own headings.
 The four remaining external links are the PyPI and npm project pages, which 404 until first
 publish and are expected to.
+
+## D058 — Seventeen findings from two adversarial sweeps: the recurring class, worked
+
+*2026-08-06* — **narrows D021's reachability prose, resolves a contradiction in FORMAT.md §13, inverts the shared-subtree allowance, corrects D048's stale note and D051's mutability item**
+
+Two read-only sweeps, one per language, hunting a single defect class: **a validator
+establishes less than its consumers assume.** Sibling forms: documented behaviour with no
+pinning test; a check whose comment reads wider than its reach. Four instances were already
+known — `walk_margin` refusing nothing where D022 said it refused, a dependency count reading
+one manifest field, a packaging script printing the sdist's name without opening it, and a
+constructor establishing termination but nothing else.
+
+### The two that could produce a wrong number
+
+**A DAG was accepted as a tree, in both readers, returning the same plausible margin.** Child
+indices in range, reachable subgraph acyclic, every node consistently internal or leaf — and two
+parents pointing at one child. Because *both* languages accepted it and agreed on the number,
+cross-language parity could never have caught it. Agreement is not correctness; that is the
+premise of this project's gate structure, demonstrated against itself.
+
+Both readers now refuse it, counting in-edges during the traversal that already runs.
+`trees.extract_trees` refuses it too, where the consequence was different and worse: export's
+self-check enumerates root-to-leaf *paths*, which equals the leaf count only for a tree, so a
+hand-built forward-pointing diamond chain made `export_model` **hang** — 18 nodes 0.006 s, 26
+nodes 0.265 s, 34 nodes 14.18 s, 60 never returned. A hang is the one failure a caller cannot
+catch.
+
+Measured before deciding: maximum in-degree across all 582 fixture trees and 3258 nodes is **1**,
+so nothing this exporter produces is affected. This **inverts a considered position** — a Python
+test asserted the permissive behaviour and checked the DAG's exact margin bits, and
+`artifact.ts` documented it as deliberate. Both are superseded, and the test is inverted rather
+than deleted, with a companion asserting an ordinary tree still loads so a `>= 1` typo cannot
+pass.
+
+**The JavaScript `Predictor` constructor did not establish finiteness.**
+`new Predictor({...loaded, intercept: Infinity}).output(row)` returned **`1`** — a plausible
+probability. `fromJSON` always enforced it; the constructor is exported and validated only
+`outputTransform`. Empty `featureNames` was reachable the same way, which **voids D021** in that
+decision's own words: "a strict-key policy with no keys to check reads as enforced and is not."
+Duplicates supplied one column twice. All four are now established there.
+
+### The asymmetry in refusal semantics
+
+A loaded JavaScript model was **mutable**: `p.intercept = 100` changed every prediction,
+`p.trees[0].splitIndices[0] = 1` rerouted a split, and `readonly` on `LoadedTree` is compile-time
+only. The Python reader refused each equivalent. Refusal semantics are the published contract, so
+this was a difference between the two packages' contracts rather than a considered difference —
+and tightening it after 1.0.0 would be a breaking change. The instance and each tree object are
+frozen now. Element writes into a typed array remain possible, because `Object.freeze` on a
+`Float32Array` with elements throws; that residue is documented rather than claimed away.
+
+D051 recorded "*both* `Predictor` classes are mutable while their docstrings imply otherwise."
+Half of that was already false — Python's docstring was accurate. The other half was worse than
+recorded, because the Python one *could* be defeated: `node_values.flags.writeable = False` on an
+array that owns its buffer can simply be set back to `True`. Handing out a view of a read-only
+base makes the claim true, since numpy refuses to re-enable the flag when the base is not
+writeable.
+
+### Freezing broke three mutation-based proofs, and the replacements are stronger
+
+Two tests and the parity emitter proved `objective` and `provenance` non-operative by
+overwriting them after construction. Freezing made that throw. Each now **constructs** a
+differently-labelled predictor instead — which is not merely equivalent: mutating a field after
+construction cannot detect a version that reads it *during* construction and caches a transform,
+because the cache is already built and the numbers do not move. The old technique could have
+passed while `objective` became operative.
+
+### Guards whose docstrings claimed more than they delivered
+
+- **`objectives._observed_margin` passed one row** to a helper that asserts constancy by
+  requiring exactly one distinct bit pattern — unconditionally true on a size-1 array. Its
+  docstring called the constancy "asserted rather than assumed"; it was assumed. This is the
+  export path for the intercept of every zero-tree model, and `_verify_against_source_margin` is
+  tautological for such a model, so nothing downstream would have caught a row-dependent margin.
+  Two rows now, with distinct values.
+- **`validate._check_categorical_splits` searched a truncated array.** `1 in split_type` over an
+  array shorter than the node count searches the wrong domain: on a real categorical model,
+  clearing the other two signals and truncating `split_type` to `[0]` made this gate **pass**
+  while `trees.extract_trees` refused the same document. `trees.py` carried the length check with
+  a rationale and a test; the fix had been applied in one of the two modules that read the field.
+  `validate_source_model`'s docstring invites use as a standalone gate, so a false pass there is a
+  defect regardless of what catches it afterwards.
+- **Three bare `int()` calls** leaked `ValueError` out of modules documenting that a caller
+  receives "one of the structured exceptions in `xgboost_bridge.errors`". `num_feature = "1.0"`
+  was enough. The identical defect at the identical idiom had already been found and fixed once,
+  for `best_iteration`.
+- **Two silent defaults in `validate.py`.** `attributes` present but not a dict made the D038
+  early-stopping refusal `return None` — absence legitimately defaults, a wrong *type* is not
+  absence. And emptiness of `feature_names` was checked only `and num_feature != 0`, so
+  `feature_names: []` with `num_feature: "0"` passed the whole gate, including the length check
+  (`0 == 0`), and export would emit an artifact our own reader and our own published schema both
+  refuse. XGBoost declines to configure a 0-feature learner, which is why no test caught it.
+
+### FORMAT.md §13 contradicted itself, and nothing recorded which horn won
+
+"A reader **MUST NOT** raise on a node that is unreachable from the root" cannot hold alongside
+the requirements two paragraphs above it that an out-of-range child, an out-of-range
+`split_indices`, and a non-finite `node_values` entry **MUST** raise.
+
+Resolved in favour of the narrow reading, which is what both readers already do: **every per-node
+rule applies to every node, reachable or not**, and the only exemption is the cycle-and-tree
+check, because an unreachable cycle cannot make the walk non-terminating. Measured on five
+artifacts differing only at an unreachable node — canonical content and an unreachable cycle
+load; `split_indices = 2147483647`, an out-of-range child, and `default_left = 7` each raise. A
+conforming producer neutralizing per §8.3 writes individually-valid values, so copying XGBoost's
+own dead marker through verbatim is not conforming. The wide claim appeared in three places and
+is corrected in all of them.
+
+### Published text that was wrong
+
+Both package READMEs promised that "every error carries structured properties — `field`, `value`,
+`expected`, `index`, `feature`". **No error carries all of them**, and
+`FeatureKeyMismatchError` and `UnsupportedObjectiveError` carry none — so a caller following the
+README read `err.field` as `undefined`, or as an `AttributeError`. The attribute names differ
+between the two languages as well (`missing`/`extra` versus `missing_keys`/`extra_keys`), which I
+also got wrong on the first attempt at the correction. Now enumerated per class, and pinned by a
+test that checks the names against the classes in both directions — this text is frozen into the
+wheel's `METADATA` and the npm tarball at publish.
+
+`artifact.ts` also told a reader that `ErrorCode` "enumerates five codes" and that
+`MALFORMED_ARTIFACT` and `NON_FINITE_FEATURE` reach a consumer's `default` branch through a type
+assertion. D048 widened the union to seven; the comment was not updated, `grep "as ErrorCode"`
+returns nothing, and `tsc` is clean. It was directing a reader to handle the two most common
+failures in a fallback.
+
+### Two guards with no test in either direction
+
+`elementAt` and the walk's `default_left` re-check. Both fire correctly and both were reachable
+only through the public constructor, so under D019 — "redundant safeguards are untested
+safeguards" — reverting either turned zero tests red. `elementAt`'s own docstring names the
+silent failure it prevents: an out-of-range typed-array read yields `undefined`,
+`Math.fround(undefined)` is `NaN`, and `NaN` is this format's *missing value*, so the walk would
+route down a legitimate branch and return a confident wrong number. Both now pinned, along with
+every `ErrorCode` string a consumer can switch on — `NON_FINITE_FEATURE` was pinned by nothing.
+
+### Not acted on, with reasons
+
+**`export._self_check_rows` can miss a live leaf.** Its sufficiency argument — "a node whose
+interval is empty is reachable by no input at all" — is **false for `NaN`**, which routes by
+`default_left` and ignores thresholds entirely, so a node with an empty finite box can still be
+reached. A constructed 7-node case reaches leaf 6 only via `[nan, 5.0]`, and corrupting that
+leaf's value leaves every self-check margin identical. Latent rather than live: a search of 162
+fitted models — `exact`/`hist`/`approx` × depth 4/8/12 × 0/30/70 % missing × 2/6 columns × 3
+seeds — found **0** live nodes with an empty box. The argument is wrong and the exposure is
+unreached; recorded here rather than papered over, and a fix that makes coverage an asserted
+invariant rather than an argument is the right shape.
+
+**`UNSUPPORTED_BOOSTER` is unreachable in the JavaScript package** — booster refusal is
+export-side and lives in Python — while `types.ts` says the union is "every error this package can
+raise". Left as-is: removing it from the union would be a breaking type change for a caller who
+switches exhaustively, and the honest fix is a comment, which is what it now has.
+
+**`PAIRED_TRANSFORM` is a frozen ordinary-prototype object** where its sibling
+`OUTPUT_FUNCTIONS` uses `Object.create(null)` and documents that as load-bearing. Not
+exploitable — `objective` is allow-list-checked first, and the subsequent comparison would throw
+on a prototype hit — but the safety is an ordering property rather than a structural one.
+
+**FORMAT.md §5.5's "each operation is a separate statement" is enforced by an AST scan on the
+Python side and by nothing on the TypeScript side.** A fused `Math.fround(a * b + c)` would leave
+every JavaScript ULP test green — it would score *better* against mpmath — and be caught only by
+the parity harness, which lives in the Python suite.
+
+Suites: Python 1041 → 1056, Node 138 → 148.

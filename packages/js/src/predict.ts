@@ -125,8 +125,12 @@ export class Predictor {
   /**
    * Load an already-validated artifact.
    *
-   * `fromJSON` is the ordinary entry point and validates everything; this
-   * constructor is public, so it validates the one field it *uses*.
+   * `fromJSON` is the ordinary entry point and validates everything. This
+   * constructor is public, so it independently establishes every property the
+   * walk depends on: a known `outputTransform`, termination and tree-ness of
+   * each tree, a finite `intercept`, finite `node_values`, and a non-empty set
+   * of distinct `featureNames`. It does not trust its argument to have come
+   * from `fromJSON`, because for most of this package's life it did not have to.
    * `outputTransform` must name a transform this package implements, as an
    * **own** property of {@link OUTPUT_FUNCTIONS}. Without that check a name
    * such as `"constructor"` or `"valueOf"` resolved through the prototype
@@ -137,7 +141,9 @@ export class Predictor {
    * unrecognized name throws instead.
    *
    * @throws {MalformedArtifactError} if `outputTransform` is not one of the
-   *   three names FORMAT.md §5 defines.
+   *   three names FORMAT.md §5 defines; if any tree contains a cycle or a
+   *   shared child reachable from its root; if `intercept` or any `node_values`
+   *   entry is not finite; or if `featureNames` is empty or has a duplicate.
    */
   constructor(loaded: LoadedArtifact) {
     // Before any field is stored: an unrecognized transform means this object
@@ -183,6 +189,55 @@ export class Predictor {
     // transform is a function this object holds and nothing consults a name
     // again.
     this.outputFunction = OUTPUT_FUNCTIONS[loaded.outputTransform];
+
+    // Finiteness, and the feature-name properties. FORMAT.md §9.3 makes these a
+    // MUST for the reader and `loadArtifact` enforces them -- but this
+    // constructor is public and `walk` assumes them, so a hand-built
+    // `LoadedArtifact` reached the walk with `intercept: Infinity` and
+    // `output()` returned `1`, which is a *plausible probability*. That is the
+    // worst failure this package can produce, and it was reachable through an
+    // exported constructor.
+    //
+    // Empty `featureNames` was reachable the same way, which voids D021: a
+    // strict-key policy with no keys to check "reads as enforced and is not", in
+    // the wording of that decision itself. Duplicates meant one column silently
+    // supplied twice.
+    if (!Number.isFinite(this.intercept)) {
+      throw new MalformedArtifactError("intercept", this.intercept, "a finite float32 value");
+    }
+    if (this.featureNames.length === 0) {
+      throw new MalformedArtifactError("feature_names", 0, "at least one feature name");
+    }
+    if (this.featureNameSet.size !== this.featureNames.length) {
+      const seen = new Set<string>();
+      const duplicate = this.featureNames.find((name) => seen.size === seen.add(name).size);
+      throw new MalformedArtifactError("feature_names", duplicate, "distinct feature names");
+    }
+    this.trees.forEach((tree, index) => {
+      for (let node = 0; node < tree.nodeValues.length; node += 1) {
+        const value = tree.nodeValues[node] as number;
+        if (!Number.isFinite(value)) {
+          throw new MalformedArtifactError(
+            "node_values",
+            value,
+            `a finite float32 value at node ${node}`,
+            `trees[${index}]`,
+          );
+        }
+      }
+    });
+
+    // The instance itself. `readonly` is compile-time only, so `p.intercept =
+    // 100` silently changed every prediction at runtime -- while the Python
+    // `Predictor` refused the equivalent (`intercept` has no setter, `provenance`
+    // is a mappingproxy, `node_values` is non-writeable). That was an asymmetry
+    // in refusal semantics between the two readers, which is the published
+    // contract, and tightening it after 1.0.0 would be a breaking change (D058).
+    //
+    // Tree objects and arrays are frozen by `loadArtifact`. Element writes into a
+    // typed array remain possible -- `Object.freeze` on a `Float32Array` that has
+    // elements throws -- and that residue is documented rather than claimed away.
+    Object.freeze(this);
   }
 
   /**
@@ -196,7 +251,10 @@ export class Predictor {
    *   {@link featureNames}. Lenient handling would turn a typo into a
    *   missing-value path, which is legitimate model structure, so the mistake
    *   would become a confident wrong number instead of an error.
-   * @throws {NonFiniteFeatureError} if any value is `±Infinity` (D022, D045).
+   * @throws {NonFiniteFeatureError} if any value is infinite **in float32** —
+   *   `±Infinity`, and also any finite double that narrows to it, such as
+   *   `1e39` (D022, D045, D055). This package compares in float32, so the two
+   *   are the same value at the point of comparison.
    * @throws {MalformedArtifactError} if `row` is not an object, or a value is
    *   not a number.
    */

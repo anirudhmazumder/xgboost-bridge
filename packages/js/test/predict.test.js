@@ -510,13 +510,22 @@ test("a rejected transform yields no object at all, so nothing wrong can be call
 test("the objective is exposed for inspection and is only ever a label", () => {
   const predictor = fromJSON(WORKED_EXAMPLE);
   assert.equal(predictor.objective, "binary:logistic");
-  // Overwriting the label cannot change a prediction, because no prediction
-  // path reads it. (A frozen field would make this unassertable, which is why
-  // it is a plain data property.)
   const row = { feature_a: 0.25, feature_b: 9.0 };
   const before = bits32(predictor.output(row));
-  predictor.objective = "survival:cox";
-  assert.equal(bits32(predictor.output(row)), before);
+
+  // A *differently labelled* predictor, built through the public constructor
+  // rather than the same one mutated afterwards. The instance is frozen now
+  // (D058), so the old mutation no longer works -- and the replacement is
+  // strictly stronger anyway. Mutating `objective` after construction cannot
+  // detect a version that reads it *during* construction and caches a transform:
+  // the cache would already be built, the numbers would not move, and the test
+  // would pass while `objective` had quietly become operative. Constructing with
+  // a different label exercises the path where that would show.
+  const loaded = loadArtifact(WORKED_EXAMPLE);
+  const relabelled = new Predictor({ ...loaded, objective: "survival:cox" });
+  assert.equal(relabelled.objective, "survival:cox");
+  assert.equal(bits32(relabelled.output(row)), before);
+  assert.equal(bits32(relabelled.margin(row)), bits32(predictor.margin(row)));
   assert.equal(bits32(predictor.margin(row)), bits32(Math.fround(0.28046516)));
 });
 
@@ -576,17 +585,30 @@ test("no prediction method mentions `provenance` in its own source (D015)", () =
     }
   }
 
-  // And the behavioural half, since a source scan can be evaded: the block is
-  // replaced after loading, so its load-time validation still ran on the real
-  // value, and every number must be bit-identical afterwards.
+  // And the behavioural half, since a source scan can be evaded. Built with a
+  // corrupted provenance block rather than corrupted after loading: the instance
+  // is frozen now (D058), and constructing with the bad value also covers a
+  // version that reads provenance during construction, which post-hoc
+  // replacement could not.
   const predictor = fromJSON(WORKED_EXAMPLE);
   const row = { feature_a: 0.25, feature_b: 9.0 };
   const before = [bits32(predictor.margin(row)), bits32(predictor.output(row))];
-  Object.defineProperty(predictor, "provenance", {
-    value: { base_score: "corrupted", exporter_version: "corrupted", xgboost_version: "corrupted" },
-    configurable: true,
+  const corrupted = new Predictor({
+    ...loadArtifact(WORKED_EXAMPLE),
+    provenance: {
+      base_score: "corrupted",
+      exporter_version: "corrupted",
+      xgboost_version: "corrupted",
+    },
   });
-  assert.deepEqual([bits32(predictor.margin(row)), bits32(predictor.output(row))], before);
+  assert.deepEqual([bits32(corrupted.margin(row)), bits32(corrupted.output(row))], before);
+
+  // And the freeze itself, since it is what made the old technique impossible:
+  // an assignment to a frozen instance throws in a module (strict mode).
+  assert.throws(() => {
+    predictor.intercept = 100;
+  }, TypeError);
+  assert.equal(bits32(predictor.margin(row)), before[0]);
 });
 
 test("fromJSON takes a parsed object and never a string or a path", () => {
@@ -700,4 +722,132 @@ test("NaN is still the missing value, not an overflow", () => {
   // Math.fround(NaN) is NaN, which is neither Infinity nor -Infinity, so the
   // narrow-then-test guard must let it through.
   assert.ok(Number.isFinite(predictor.margin({ [name]: NaN })));
+});
+
+// ---------------------------------------------------------------------------
+// The constructor establishes what the walk assumes (D058)
+//
+// `fromJSON` always enforced these. The constructor is exported, and for most of
+// this package's life it validated only `outputTransform` -- so a hand-built
+// `LoadedArtifact` reached the walk with `intercept: Infinity` and `output()`
+// returned `1`, a plausible probability. Empty `featureNames` voided D021's
+// strict-key policy the same way, and a duplicate supplied one column twice.
+// ---------------------------------------------------------------------------
+
+function loadedWorkedExample() {
+  return loadArtifact(WORKED_EXAMPLE);
+}
+
+for (const value of [Infinity, -Infinity, NaN]) {
+  test(`the constructor refuses a non-finite intercept: ${value}`, () => {
+    assert.throws(
+      () => new Predictor({ ...loadedWorkedExample(), intercept: value }),
+      (error) => error instanceof MalformedArtifactError && error.field === "intercept",
+    );
+  });
+}
+
+test("the constructor refuses a non-finite node_values entry", () => {
+  const loaded = loadedWorkedExample();
+  const tree = loaded.trees[0];
+  const poisoned = Float32Array.from(tree.nodeValues);
+  poisoned[1] = Infinity;
+  assert.throws(
+    () => new Predictor({ ...loaded, trees: [{ ...tree, nodeValues: poisoned }] }),
+    (error) => error instanceof MalformedArtifactError && error.field === "node_values",
+  );
+});
+
+test("the constructor refuses empty feature names, which would void the strict-key policy", () => {
+  // D021: "a strict-key policy with no keys to check reads as enforced and is
+  // not". With no names, every row's key set matches trivially.
+  assert.throws(
+    () => new Predictor({ ...loadedWorkedExample(), featureNames: [] }),
+    (error) => error instanceof MalformedArtifactError && error.field === "feature_names",
+  );
+});
+
+test("the constructor refuses duplicate feature names", () => {
+  const loaded = loadedWorkedExample();
+  const name = loaded.featureNames[0];
+  assert.throws(
+    () => new Predictor({ ...loaded, featureNames: [name, name] }),
+    (error) => error instanceof MalformedArtifactError && error.field === "feature_names",
+  );
+});
+
+test("a valid loaded artifact still constructs, so the new refusals do not creep", () => {
+  const predictor = new Predictor(loadedWorkedExample());
+  assert.ok(Number.isFinite(predictor.margin({ feature_a: 0.25, feature_b: 9.0 })));
+  assert.ok(Object.isFrozen(predictor), "the instance must be frozen");
+});
+
+// ---------------------------------------------------------------------------
+// The two guards that stood between a hand-built artifact and a wrong number,
+// and had no test in either direction (D019: an untested safeguard is one a
+// later refactor deletes silently)
+// ---------------------------------------------------------------------------
+
+test("an out-of-range node index raises rather than reading undefined", () => {
+  // elementAt's own doc names the silent failure it prevents: an out-of-range
+  // typed-array read yields `undefined`, `Math.fround(undefined)` is `NaN`, and
+  // `NaN` is this format's *missing value* -- so the walk would route down a
+  // legitimate branch and return a confident wrong number.
+  //
+  // Reached by pointing a child at a node outside the shorter arrays, which the
+  // constructor's checks cannot see because every array is self-consistently
+  // indexed until the walk follows that child.
+  const loaded = loadedWorkedExample();
+  const tree = {
+    leftChildren: Int32Array.from([1, -1]),
+    rightChildren: Int32Array.from([5, -1]), // node 5 does not exist
+    splitIndices: Int32Array.from([0, 0]),
+    nodeValues: Float32Array.from([0.5, 1.5]),
+    defaultLeft: Uint8Array.from([0, 0]),
+  };
+  const predictor = new Predictor({ ...loaded, trees: [tree] });
+  assert.throws(
+    () => predictor.margin({ feature_a: 9.0, feature_b: 0.0 }),
+    (error) => error instanceof MalformedArtifactError && error.field === "<node index>",
+  );
+});
+
+test("a default_left outside {0,1} raises at the node that reads it", () => {
+  const loaded = loadedWorkedExample();
+  const tree = {
+    leftChildren: Int32Array.from([1, -1, -1]),
+    rightChildren: Int32Array.from([2, -1, -1]),
+    splitIndices: Int32Array.from([0, 0, 0]),
+    nodeValues: Float32Array.from([0.5, 1.5, 2.5]),
+    defaultLeft: Uint8Array.from([7, 0, 0]),
+  };
+  const predictor = new Predictor({ ...loaded, trees: [tree] });
+  // NaN is the missing value, so this is the row that consults default_left.
+  assert.throws(
+    () => predictor.margin({ feature_a: NaN, feature_b: 0.0 }),
+    (error) => error instanceof MalformedArtifactError && error.field === "default_left",
+  );
+});
+
+test("every error code a consumer can switch on is pinned by its exact string", () => {
+  // The helper elsewhere in this suite asserts only that `code` is a non-empty
+  // string, which passes for any renamed code. A caller branching on `code` needs
+  // the strings themselves fixed. NON_FINITE_FEATURE was pinned by nothing.
+  const predictor = fromJSON(WORKED_EXAMPLE);
+  const cases = [
+    [() => predictor.margin({ feature_a: Infinity, feature_b: 0 }), "NON_FINITE_FEATURE"],
+    [() => predictor.margin({ feature_a: 0 }), "FEATURE_KEY_MISMATCH"],
+    [() => fromJSON({ ...WORKED_EXAMPLE, format_version: 2 }), "UNSUPPORTED_VERSION"],
+    [() => fromJSON({ ...WORKED_EXAMPLE, objective: "rank:pairwise" }), "UNSUPPORTED_OBJECTIVE"],
+    [() => fromJSON({ ...WORKED_EXAMPLE, surprise: 1 }), "UNRECOGNIZED_FIELD"],
+    [() => fromJSON({ ...WORKED_EXAMPLE, intercept: "nope" }), "MALFORMED_ARTIFACT"],
+  ];
+  for (const [thrower, expected] of cases) {
+    try {
+      thrower();
+      assert.fail(`expected ${expected} but nothing was thrown`);
+    } catch (error) {
+      assert.equal(error.code, expected, `wrong code for ${expected}`);
+    }
+  }
 });

@@ -33,9 +33,14 @@ skipped (D007).
 
 Two rules cut the other way and are just as load-bearing:
 
-* A node **unreachable** from the root does not raise. Neutralized dead slots
-  are legitimate artifact content (FORMAT.md section 8.3) and a reader that
-  rejected them would reject every pruned model.
+* A node **unreachable** from the root is exempt from the cycle-and-tree
+  check, and from nothing else. Neutralized dead slots are legitimate artifact
+  content (FORMAT.md section 8.3) and a reader that rejected them would reject
+  every pruned model -- but every per-node rule still applies wherever the node
+  sits. Measured: canonical content and a cycle among unreachable nodes both
+  load; ``split_indices = 2147483647``, an out-of-range child, and
+  ``default_left = 7`` all raise, unreachable or not. "Does not raise whatever
+  it holds" was the wider claim and was never the behaviour (D058).
 * ``objective`` is **non-operative metadata** (D028). No function on the
   prediction path reads it; ``output_transform`` alone selects the transform.
   The pairing cross-check happens once, at load, which is the field's entire
@@ -461,7 +466,14 @@ def _read_node_values(raw: object, location: str) -> np.ndarray:
             f"a finite float32 value at position {position}",
             location,
         )
+    # A non-owning VIEW, then cleared. `writeable` can be set back to True on an
+    # array that owns its buffer, so the previous one-line flag clear was
+    # reversible in one line -- `v.flags.writeable = True; v[1] = 999.0` moved a
+    # threshold and the margin with it, while two docstrings said a caller
+    # "cannot alter the loaded model". numpy refuses to re-enable the flag on a
+    # view whose base is not writeable, so this makes the claim true (D058).
     values.flags.writeable = False
+    values = values.view()
     return values
 
 

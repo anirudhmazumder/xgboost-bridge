@@ -392,6 +392,23 @@ def _logistic_intercept(base_score: np.float32) -> np.float32:
     return np.float32(-np.log(odds))
 
 
+def _read_int(container: Mapping[str, Any], field: str, location: str) -> int:
+    """Read an integer-valued field without letting `int()` raise unstructured.
+
+    The bare `int(...)` this replaces turned `num_feature = "1.0"` into
+    `ValueError: invalid literal for int()`, which `except XGBoostBridgeError`
+    does not catch. The identical defect at the identical idiom was already found
+    and fixed once for `best_iteration`; this was the third unguarded call.
+    """
+    raw = _required(container, field, location)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise MalformedTreeError(
+            field, raw, "an integer-valued string", location
+        ) from None
+
+
 def _emit(value: np.float32) -> float:
     """Widen a float32 to the float64 that recovers exactly that float32.
 
@@ -515,10 +532,22 @@ def _observed_margin(booster: Any, learner: dict[str, Any]) -> np.float32:
 
     feature_names = _required(learner, "feature_names", "learner")
     model_param = _required(learner, "learner_model_param", "learner")
-    column_count = int(_required(model_param, "num_feature", "learner.learner_model_param"))
+    column_count = _read_int(
+        model_param, "num_feature", "learner.learner_model_param"
+    )
 
     matrix = xgboost.DMatrix(
-        np.zeros((1, column_count), dtype=np.float32),
+        # TWO rows, not one. `_single_margin` asserts the margin is constant by
+        # collecting distinct bit patterns and requiring exactly one -- which on a
+        # size-1 array is unconditionally true, so the check that this function's
+        # docstring calls "asserted rather than assumed" could not fire. The
+        # sibling caller passes two rows, so the same helper had reach there and
+        # none here. This is the export path for the intercept of every zero-tree
+        # model, and `_verify_against_source_margin` is tautological for such a
+        # model, so nothing downstream would have caught a non-constant margin.
+        #
+        # Distinct values per row, so a row-dependent margin actually differs.
+        np.array([[0.0] * column_count, [1.0] * column_count], dtype=np.float32),
         feature_names=list(feature_names) or None,
         nthread=1,
     )
