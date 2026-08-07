@@ -1,36 +1,43 @@
 name: Release
 
-# CONFIGURED, NEVER EXECUTED. This file exists so the release mechanics are
-# reviewable before either package is ever published -- not because
-# publishing is imminent. No step below has been run. See COMPAT.md ("What
-# this document does not yet cover") and docs/DECISIONS.md D012 for what is and
-# is not decided about a 1.0 announcement.
+# The release workflow. It HAS now executed, against npm only, and the record of
+# what that first execution found is below -- an earlier version of this header
+# said "CONFIGURED, NEVER EXECUTED" and listed three reasons nothing could
+# publish, all of which have since changed.
 #
-# Three independent things must all be true before this workflow could
-# publish anything, and only the first is expressed in GitHub Actions syntax
-# below; the other two are facts about the world as of this writing, recorded
-# here so a future reader does not have to rediscover them:
+# What is true as of 2026-08-07:
 #
 #   1. Trigger is `workflow_dispatch` only -- no `push`, no tag trigger, no
 #      `release` event anywhere in this file. Nothing in ordinary repository
-#      activity (a commit, a merge, a tag, a GitHub Release) can start this
-#      workflow; it requires a human to open the Actions tab and click
-#      "Run workflow" deliberately.
-#   2. Both publish jobs are gated on the `release` GitHub Environment
-#      (`environment: release` below). No such environment has been created
-#      in this repository's settings as of this writing. Creating one, and
-#      attaching a required-reviewer protection rule to it, is a
-#      repository-settings change -- this file cannot make that change and
-#      does not make it. Referencing an environment name that does not exist
-#      is not by itself a guarantee that GitHub will block the run; the
-#      protection comes from the reviewer rule that has not been configured,
-#      and that is a deliberate, separate, human action.
-#   3. Neither publish step has working credentials yet, because neither
-#      package has ever been published under either name: there is no PyPI
-#      Trusted Publisher entry naming this repository and workflow for
-#      `xgboost-bridge`, and there is no `NPM_TOKEN` secret in this
-#      repository for `xgboost-predictor`. Even a manually dispatched run of
-#      this workflow would fail authentication on both publish steps today.
+#      activity can start it; it requires a human to dispatch it deliberately.
+#   2. Both publish jobs are gated on the `release` GitHub Environment, which
+#      EXISTS and carries a `required_reviewers` protection rule. Measured:
+#        gh api repos/anirudhmazumder/xgboost-bridge/environments
+#          -> release: protection_rules=required_reviewers
+#      That matters because GitHub creates an environment on first reference with
+#      no protection rules, so the name alone guarantees nothing.
+#   3. npm Trusted Publishing IS configured (anirudhmazumder / xgboost-bridge /
+#      release.yml / release), so `publish-javascript` needs no secret -- there is
+#      no npm token in this repository. PyPI Trusted Publishing is NOT yet
+#      configured, and `xgboost-bridge` does not exist on pypi.org, which is why
+#      the `targets` input exists.
+#
+# Two failures from the first two dispatches, both in this file rather than in
+# the configuration, and both recorded because their error messages named the
+# wrong thing:
+#
+#   * `npm publish dist/x.tgz` published nothing. npm parses a bare `a/b` spec as
+#     the GitHub shorthand `github:a/b`, so it ran `git ls-remote` and reported
+#     "Permission denied (publickey)" -- SSH keys, from a step that touches no
+#     git. The path is absolute now.
+#   * `setup-node` with `registry-url` wrote an .npmrc containing its own
+#     placeholder token, `XXXXX-XXXXX-XXXXX-XXXXX`. npm sent that instead of
+#     performing the OIDC exchange and the registry answered `E404 Not Found`,
+#     because npm returns 404 rather than 403 for authorization failures.
+#     Provenance had already been signed and logged to sigstore by then, since
+#     signing needs no registry auth -- so the failure looked like a publish
+#     problem rather than an auth one. `registry-url` is gone, and the publish
+#     step now asserts that no credential is configured before it runs.
 on:
   workflow_dispatch:
     inputs:
@@ -265,11 +272,27 @@ jobs:
       # be the wrong trade, and it is unnecessary: this job builds nothing. It
       # uploads a tarball that `verify` already packed under Node 20, so the
       # artifact is unaffected by the version here.
-      - name: Set up Node.js 24 with the npm registry
+      # NO `registry-url`. That option is for token auth: setup-node writes an
+      # .npmrc containing `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`
+      # and points NPM_CONFIG_USERCONFIG at it -- and when no token is supplied it
+      # substitutes its own placeholder literal, `XXXXX-XXXXX-XXXXX-XXXXX`.
+      #
+      # Measured on the second dispatch of this workflow: npm found that bogus
+      # credential, sent it instead of performing the OIDC exchange, and the
+      # registry answered `E404 Not Found - PUT .../xgboost-predictor`. npm returns
+      # 404 rather than 403 for an authorization failure, so the message names the
+      # package and says nothing about credentials. Provenance had already been
+      # signed and logged to sigstore by then, because signing needs no registry
+      # auth -- which made the failure look like a publish problem rather than an
+      # auth one.
+      #
+      # Trusted Publishing needs npm to find NO credential, so it falls through to
+      # the OIDC exchange. registry.npmjs.org is the default registry, so nothing
+      # is lost by omitting it.
+      - name: Set up Node.js 24
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
-          registry-url: "https://registry.npmjs.org"
 
       - name: Collect the tarball packed by the verify job
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -353,6 +376,20 @@ jobs:
             ls -l dist
             exit 1
           fi
+          # No credential must be configured, or npm sends it instead of doing the
+          # OIDC exchange. This is the check that would have named the previous
+          # failure immediately.
+          if npm config get //registry.npmjs.org/:_authToken 2>/dev/null | grep -qv '^undefined$'; then
+            echo "FAIL: an npm auth token is configured; Trusted Publishing requires none"
+            npm config get //registry.npmjs.org/:_authToken
+            exit 1
+          fi
+          if [ -n "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "FAIL: NODE_AUTH_TOKEN is set; Trusted Publishing requires it unset"
+            exit 1
+          fi
+          echo "no npm credential configured -- OIDC exchange will be used"
+
           echo "publishing $TARBALL"
           # No NODE_AUTH_TOKEN. npm exchanges the Actions OIDC token for a
           # short-lived credential, which is why `id-token: write` is declared on
