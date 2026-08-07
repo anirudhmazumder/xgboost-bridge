@@ -89,7 +89,7 @@ document = to_json(artifact)  # a deterministic JSON string; write it wherever y
 `document` starts:
 
 ```json
-{"feature_names":["feature_0","feature_1","feature_2"],"format_version":1,"intercept":0.18048842251300812,"objective":"binary:logistic","output_transform":"sigmoid","provenance":{"base_score":"[5.45E-1]","exporter_version":"0.1.0.dev0","xgboost_version":"3.3.0"},"trees":[{"default_left":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"left_children":[1,3,5,7,9,11,13,-1,-1,-1,-1,-1,-1,-1,-1],"node_values":[0.10408...
+{"feature_names":["feature_0","feature_1","feature_2"],"format_version":1,"intercept":0.18048842251300812,"objective":"binary:logistic","output_transform":"sigmoid","provenance":{"base_score":"[5.45E-1]","exporter_version":"1.0.0rc1","xgboost_version":"3.3.0"},"trees":[{"default_left":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"left_children":[1,3,5,7,9,11,13,-1,-1,-1,-1,-1,-1,-1,-1],"node_values":[0.10408...
 ```
 
 The Python package also ships a reference predictor, useful for checking an

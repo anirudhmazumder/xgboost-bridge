@@ -702,7 +702,7 @@ Source model had `base_score = 0.6`, so `intercept = -log(f32(f32(1/0.6) − 1))
   "output_transform": "sigmoid",
   "provenance": {
     "base_score": "[6E-1]",
-    "exporter_version": "0.1.0.dev0",
+    "exporter_version": "1.0.0rc1",
     "xgboost_version": "3.3.0"
   },
   "trees": [

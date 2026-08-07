@@ -326,3 +326,45 @@ def test_meta_records_ground_truth_provenance() -> None:
         assert not missing, f"{name}: meta is missing {sorted(missing)}"
         assert fixture["meta"]["xgboost_version"] != "latest"
         assert isinstance(fixture["meta"]["description"], str) and fixture["meta"]["description"]
+
+
+# ---------------------------------------------------------------------------
+# Fixture provenance must name the exporter that actually built them
+#
+# Nothing checked this. The whole suite passed with every fixture stamped
+# `0.1.0.dev0` while the installed package reported `1.0.0rc1`, which is the
+# stale-provenance case D052 recorded as a risk of the two unlinked version
+# literals -- observed here rather than reasoned about. A fixture whose
+# provenance names a different exporter than the one under test is either stale
+# or was built by something else, and both are worth a failure: the corpus is
+# the record of what this exporter produces, so a mislabelled record is a record
+# of nothing.
+#
+# This is also what makes the version bump auditable. It fails until the corpus
+# is regenerated, so a bump cannot land with 23 fixtures still claiming the old
+# version.
+# ---------------------------------------------------------------------------
+
+
+def test_every_fixture_names_the_current_exporter_version() -> None:
+    from xgboost_bridge import __version__
+
+    stale = {
+        name: fixture["artifact"]["provenance"]["exporter_version"]
+        for name, fixture in CORPUS.items()
+        if fixture["artifact"]["provenance"]["exporter_version"] != __version__
+    }
+    assert not stale, (
+        f"these fixtures were built by a different exporter than the installed "
+        f"{__version__}; regenerate the corpus: {stale}"
+    )
+
+
+def test_the_exporter_version_is_a_single_value_across_the_whole_corpus() -> None:
+    """A split corpus means a partial regeneration, which is how half the
+    fixtures end up describing one exporter and half another."""
+    versions = {
+        fixture["artifact"]["provenance"]["exporter_version"]
+        for fixture in CORPUS.values()
+    }
+    assert len(versions) == 1, f"corpus spans multiple exporter versions: {sorted(versions)}"

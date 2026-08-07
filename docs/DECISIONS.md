@@ -1457,3 +1457,55 @@ this decision safe are pinned rather than re-verified by hand each release.
 Revisit if the bundle ever becomes minified, which would make the maps load-bearing for
 debuggability rather than merely useful, or if `sourcesContent` ever starts carrying something
 other than the four source files.
+
+## D057 — Versions bumped to `1.0.0rc1` / `1.0.0-rc.1`, and the Python pair is now one literal
+
+*2026-08-06* — **closes the two-unlinked-literals item deferred in D051 and D052**
+
+`1.0.0rc1` on PyPI (PEP 440) and `1.0.0-rc.1` on npm (semver), so `1.0.0` stays unspent on both
+indexes. Neither rc version can ever be reused: PyPI and TestPyPI refuse re-upload of a filename
+even after deletion, and npm forbids republishing a version after unpublish. Spending an rc
+spends only that rc.
+
+### The version now has one home per package
+
+`packages/python/pyproject.toml` no longer carries a copy. It declares `dynamic = ["version"]` and
+hatchling reads `src/xgboost_bridge/_version.py`, which is the module that stamps
+`provenance.exporter_version` into every artifact. D051 and D052 both recorded the two literals as
+a deferred risk — "a one-sided bump would silently mislabel the provenance of every artifact from
+that release" — and a hand bump is exactly the operation that invites it, so it is closed here
+rather than performed carefully once more.
+
+### Proving the bump moved nothing numeric
+
+Asserted rather than assumed, because "only the version changed" is the kind of claim that is
+usually true and occasionally not. Every fixture was captured before and after:
+
+| | fixtures changed |
+|---|---|
+| Margin bit patterns (299 across 23 fixtures) | **0** |
+| Output bit patterns (299) | **0** |
+| Margin and output decimals | **0** |
+| `intercept` | **0** |
+| `node_values` — thresholds and leaves, 3258 values | **0** |
+| `provenance.exporter_version` | **23 of 23** |
+| Whole file bytes | 23 of 23 |
+| **Canonical content with `exporter_version` removed** | **0 of 23** |
+
+That last row is the proof: with one field deleted, all 23 regenerated fixtures are byte-identical
+to their predecessors. Corpus parity stays `0.0`, the 100,000-row run stays `0.0`.
+
+### A gap the bump exposed
+
+The full suite passed with all 23 fixtures stamped `0.1.0.dev0` while the installed package
+reported `1.0.0rc1`. **Nothing checked fixture provenance against the exporter under test** — so
+the stale-provenance case D052 called a risk was live, and observable, and silent. Two tests now
+close it: every fixture's `exporter_version` must equal `__version__`, and the corpus must carry a
+single value (a split corpus is how half the fixtures end up describing one exporter and half
+another, which is what a partial regeneration produces). Both were confirmed to fail on a
+deliberately staled fixture and pass after regeneration.
+
+This also makes a future bump auditable rather than trusted: the suite goes red until the corpus
+is regenerated, so a version cannot ship with fixtures claiming the previous one.
+
+Suites: Python 992 → 994, Node 124.

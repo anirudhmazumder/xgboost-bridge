@@ -1,6 +1,6 @@
 [project]
 name = "xgboost-bridge"
-version = "0.1.0.dev0"
+dynamic = ["version"]
 description = "Export trained XGBoost models as portable JSON artifacts, with a reference predictor."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -45,6 +45,13 @@ export = ["xgboost==3.3.0"]
 # and hash-locked; this was the one link that was not.
 requires = ["hatchling==1.28.0"]
 build-backend = "hatchling.build"
+
+# One version literal for the whole Python package, read from the module that
+# stamps it into every artifact's provenance. D052 recorded the manifest and
+# _version.py as two unlinked copies, where a one-sided bump would mislabel the
+# provenance of every artifact from that release without failing anything.
+[tool.hatch.version]
+path = "src/xgboost_bridge/_version.py"
 
 # Scope the sdist explicitly. Without this section hatchling's default is
 # "everything under packages/python that VCS does not ignore", which shipped all

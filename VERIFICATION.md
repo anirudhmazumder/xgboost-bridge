@@ -18,7 +18,7 @@ The distinction that matters most: **agreement between this library's two predic
 | Python ↔ JavaScript agreement | each other, on bit patterns | **exactly `0.0`**, at two measurement points |
 | Artifact shape | JSON Schema, draft 2020-12 | all 23 fixtures validate |
 
-Test suites: **977** Python, **112** Node. No skipped tests, no `xfail`.
+Test suites: **994** Python, **124** Node. No skipped tests, no `xfail`.
 
 ---
 
@@ -116,8 +116,8 @@ CI now also runs on **linux/x86_64** — glibc 2.39, CPython 3.12.3, numpy 2.5.1
 
 | Check | linux/x86_64 | darwin/arm64 |
 |---|---|---|
-| Python suite | **977 passed** | 977 passed |
-| Node suite | **112 passed** | 112 passed |
+| Python suite | **994 passed** | 994 passed |
+| Node suite | **124 passed** | 124 passed |
 | Margin parity, Python ↔ JavaScript | **exactly `0.0`** | exactly `0.0` |
 | Output parity, Python ↔ JavaScript | **exactly `0.0`** | exactly `0.0` |
 | Rows compared, fixture corpus | 299 (289 valued, 10 refused by both) | 299 |
@@ -172,13 +172,13 @@ Every empirical claim above traces to a report under [`probes/`](probes/) — 11
 
 ```bash
 uv sync                                    # Python workspace
-uv run pytest                              # 977 tests, including the parity harness
+uv run pytest                              # 994 tests, including the parity harness
 uv run python parity/run_parity.py         # cross-language agreement, both points
 uv run python parity/run_parity_scale.py   # the same, over ~100,000 adversarial rows
 
 npm --prefix packages/js install
 npm --prefix packages/js run typecheck     # separate from the build, deliberately
-npm --prefix packages/js test              # 112 tests, against the built bundle
+npm --prefix packages/js test              # 124 tests, against the built bundle
 
 ./tools/clean_install_python.sh            # wheel contents, then install and predict
 ./tools/clean_install_js.sh                # tarball contents, then install and predict
