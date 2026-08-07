@@ -50,13 +50,19 @@ on:
         type: string
       targets:
         description: >-
-          Which registries to publish to. `both` is the release path. `npm-only`
-          exists because npm requires a package to exist before Trusted
-          Publishing can be configured, so the first npm publish is manual and
-          the workflow's npm path needs a rehearsal that does not also require a
-          PyPI Trusted Publisher. A non-prerelease version MUST use `both` --
-          asserted in `verify`, because half-publishing a real release is the
-          failure this input could otherwise cause.
+          Which registries to publish to.
+
+          `both` is the release path. `npm-only` exists because npm requires a
+          package to exist before Trusted Publishing can be configured, so the
+          first npm publish is manual and the workflow's npm path needs a
+          rehearsal that does not also require a PyPI Trusted Publisher. `none`
+          runs the full gate and publishes nothing -- a dry run of everything
+          except the irreversible part, which is also how to leave a green run in
+          the history without spending a version.
+
+          A non-prerelease version MUST use `both` or `none` -- asserted in
+          `verify`, because half-publishing a real release is the failure this
+          input could otherwise cause.
         required: true
         default: both
         type: choice
@@ -64,6 +70,7 @@ on:
           - both
           - npm-only
           - pypi-only
+          - none
       allow_partial:
         description: >-
           Permit a non-prerelease to target ONE registry. Leave false for a
@@ -234,7 +241,12 @@ jobs:
             });
           ' "$VERSION")
           echo "prerelease: $IS_PRERELEASE"
-          if [ "$IS_PRERELEASE" = "no" ] && [ "${{ inputs.targets }}" != "both" ]; then
+          # `none` publishes nothing, so the both-registries requirement does not
+          # apply to it -- refusing it would make the dry run unusable on exactly
+          # the versions it is most worth rehearsing.
+          if [ "$IS_PRERELEASE" = "no" ] \
+            && [ "${{ inputs.targets }}" != "both" ] \
+            && [ "${{ inputs.targets }}" != "none" ]; then
             if [ "${{ inputs.allow_partial }}" != "true" ]; then
               echo "FAIL: $VERSION is not a prerelease, so targets must be 'both'"
               echo "  (set allow_partial=true only to complete a split release)"
@@ -255,7 +267,11 @@ jobs:
   publish-python:
     name: Publish xgboost-bridge to PyPI
     needs: verify
-    if: inputs.targets != 'npm-only'
+    # An ALLOW-list. The condition was `!= 'npm-only'`, which fails OPEN: any
+    # value other than that one publishes, so adding a new option -- `none`, or
+    # anything later -- would have silently published to PyPI by default. Naming
+    # the values that publish means an unrecognised input publishes nothing.
+    if: inputs.targets == 'both' || inputs.targets == 'pypi-only'
     runs-on: ubuntu-latest
     # No environment named "release" exists in this repository yet -- see the
     # file header. Until it is created with a required-reviewer rule, this name
@@ -296,7 +312,7 @@ jobs:
     # never failed.
     if: >-
       !cancelled()
-      && inputs.targets != 'pypi-only'
+      && (inputs.targets == 'both' || inputs.targets == 'npm-only')
       && needs.verify.result == 'success'
       && (needs.publish-python.result == 'success'
           || needs.publish-python.result == 'skipped')
@@ -481,6 +497,9 @@ jobs:
   verify-dist-tags:
     name: Assert the npm dist-tags point where they should
     needs: [verify, publish-javascript]
+    # Nothing published means nothing to verify. Without this the job would be
+    # skipped anyway by its `needs`, but stating it keeps the reason legible.
+    if: inputs.targets == 'both' || inputs.targets == 'npm-only'
     runs-on: ubuntu-latest
     permissions:
       contents: read # no id-token: this job verifies, it cannot publish

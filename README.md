@@ -1,5 +1,8 @@
 # xgboost-bridge
 
+[![PyPI](https://img.shields.io/pypi/v/xgboost-bridge?label=PyPI&color=informational)](https://pypi.org/project/xgboost-bridge/)
+[![npm](https://img.shields.io/npm/v/xgboost-predictor?label=npm&color=informational)](https://www.npmjs.com/package/xgboost-predictor)
+
 `xgboost-bridge` exports trained XGBoost models as portable JSON artifacts.
 `xgboost-predictor` runs zero-dependency JavaScript inference on those
 artifacts in browsers, edge runtimes, and Node.
