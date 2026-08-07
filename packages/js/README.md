@@ -34,8 +34,12 @@ Both ESM and CommonJS are supported.
 Refusing loudly is the point of the package, not an omission:
 
 - **Feature keys must match exactly** — no missing key, no extra key. Lenient handling would turn a typo into a missing-value path, which is legitimate model structure, so the mistake becomes a confident wrong number rather than an error. You normalize the shape; this package will not guess.
-- **`NaN` is the missing value** and routes by the tree's default direction. **`±Infinity` raises** — upstream XGBoost is itself inconsistent here, giving different predictions depending on the call path used.
+- **`NaN` is the missing value** and routes by the tree's default direction. **A value that is infinite in `float32` raises** — `±Infinity`, and also any finite double that narrows to it, such as `1e39`. This package compares in `float32`, so those are the same value at the point of comparison. Upstream XGBoost is itself inconsistent about infinity, giving different predictions depending on the call path used.
 - **A malformed or unrecognized artifact raises** — an unknown field, an unsupported version marker, an out-of-range index, an objective/transform mismatch.
+
+## Error messages quote your artifact back
+
+Every error carries structured properties — `field`, `value`, `expected`, `index`, `feature` — and the human-readable `message` embeds the offending value verbatim so a developer can see what arrived. If your artifact or prediction input can be influenced by someone else (served from a CDN or a bucket, pasted by a user), **treat `err.message` as untrusted text**: escape it before rendering, or branch on the structured properties and compose your own message. Rendering it into `innerHTML` unescaped would let whoever controls the artifact run script in your origin. This is ordinary library behaviour rather than a defect — the structured properties exist so you never have to parse or display the string.
 
 ## Numerical behaviour worth knowing
 

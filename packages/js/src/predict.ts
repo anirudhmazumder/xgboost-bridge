@@ -43,7 +43,7 @@ import {
   LEAF_CHILD,
   MalformedArtifactError,
   NonFiniteFeatureError,
-  checkReachableSubgraphTerminates,
+  checkReachableSubgraphIsATree,
   loadArtifact,
   type LoadedArtifact,
   type LoadedTree,
@@ -163,7 +163,7 @@ export class Predictor {
     // recording whether validation happened, which is the kind of coupling that
     // goes stale silently.
     loaded.trees.forEach((tree, index) => {
-      checkReachableSubgraphTerminates(
+      checkReachableSubgraphIsATree(
         tree.leftChildren,
         tree.rightChildren,
         `trees[${index}]`,

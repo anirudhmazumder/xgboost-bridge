@@ -559,7 +559,7 @@ function readProvenance(envelope: Record<string, unknown>): Record<string, strin
  * parent's. FORMAT.md §8 does not make that normative for an artifact, so
  * demanding it here would refuse a conforming artifact from another producer.
  * Termination is enforced directly instead, by
- * {@link checkReachableSubgraphTerminates}.
+ * {@link checkReachableSubgraphIsATree}.
  */
 function checkChildLinks(
   leftChildren: readonly number[],
@@ -615,8 +615,18 @@ const SETTLED = 2;
  * subgraph, because FORMAT.md §13 forbids raising on an unreachable node
  * whatever it contains.
  *
- * A shared subtree — two parents pointing at one child, no cycle — is not
- * refused. It terminates, so it is not this check's business.
+ * A shared subtree — two parents pointing at one child, no cycle — **is** now
+ * refused. An earlier version of this comment declared it permitted because it
+ * terminates, which is true and is not the point: such a structure is a directed
+ * acyclic graph, not a tree, and no XGBoost model is one. Measured across every
+ * fixture — 582 trees, 3258 nodes — the maximum in-degree is 1, so refusing costs
+ * nothing this exporter can produce.
+ *
+ * What it buys: a hand-edited or third-party artifact that shares a child by
+ * accident previously loaded and returned a *plausible* margin from the silently
+ * shared subtree. Both readers did, and returned the same number, so
+ * cross-language parity could never have caught it — agreement is not
+ * correctness (D058).
  */
 // Exported so the `Predictor` constructor can establish the same property. That
 // constructor is public and is not required to go through `fromJSON`, and a
@@ -625,12 +635,16 @@ const SETTLED = 2;
 // than `readonly number[]` so it accepts both the raw parsed arrays here and the
 // `Int32Array`s a `LoadedTree` carries; the body uses only `.length` and index
 // access.
-export function checkReachableSubgraphTerminates(
+export function checkReachableSubgraphIsATree(
   leftChildren: ArrayLike<number>,
   rightChildren: ArrayLike<number>,
   location: string,
 ): void {
   const colour = new Uint8Array(leftChildren.length);
+  // In-edges among reachable nodes, counted during the same traversal rather than
+  // in a second pass. Saturating at 2 is enough: the question is only whether any
+  // node has more than one parent.
+  const parents = new Uint8Array(leftChildren.length);
   // [node, revisiting] — the second pass over a node marks it settled, which
   // is what turns a plain reachability walk into cycle detection. Iterative
   // rather than recursive: a deep tree would otherwise depend on the engine's
@@ -652,6 +666,18 @@ export function checkReachableSubgraphTerminates(
       continue;
     }
     for (const child of [leftChildren[node] as number, rightChildren[node] as number]) {
+      if ((parents[child] as number) < 2) {
+        parents[child] = (parents[child] as number) + 1;
+      }
+      if ((parents[child] as number) > 1) {
+        throw new MalformedArtifactError(
+          "left_children",
+          child,
+          `a child with exactly one parent; node ${child} is reachable from two ` +
+            "parents, which makes this a directed acyclic graph rather than a tree",
+          location,
+        );
+      }
       if (colour[child] === ON_PATH) {
         throw new MalformedArtifactError(
           "left_children",
@@ -738,7 +764,7 @@ function readTree(raw: unknown, index: number, featureCount: number): LoadedTree
   }
 
   checkChildLinks(leftChildren, rightChildren, location);
-  checkReachableSubgraphTerminates(leftChildren, rightChildren, location);
+  checkReachableSubgraphIsATree(leftChildren, rightChildren, location);
 
   return {
     leftChildren: Int32Array.from(leftChildren),
@@ -796,6 +822,16 @@ export function loadArtifact(artifact: unknown): LoadedArtifact {
     featureNames: Object.freeze(featureNames),
     intercept,
     provenance,
-    trees: Object.freeze(trees),
+    // Each tree object as well as the array holding them. Freezing only the array
+    // left `p.trees[0].nodeValues = new Float32Array([...])` and
+    // `p.trees[0].splitIndices[0] = 1` open, either of which reroutes a split and
+    // changes every prediction; `readonly` on `LoadedTree` is compile-time only.
+    // The Python reader already refused the equivalent, so this was an asymmetry
+    // rather than a considered difference (D058).
+    //
+    // Element writes into a typed array cannot be prevented -- `Object.freeze` on
+    // a `Float32Array` that has elements throws -- so `nodeValues[1] = 999` is
+    // still possible. Wholesale replacement is not.
+    trees: Object.freeze(trees.map((tree) => Object.freeze(tree))),
   });
 }

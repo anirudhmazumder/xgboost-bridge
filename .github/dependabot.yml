@@ -1,0 +1,59 @@
+# Advisory scanning, which this repository had none of: no Dependabot, no
+# Renovate, no `npm audit` step, no `pip-audit`, and `--no-audit` passed
+# deliberately in tools/clean_install_js.sh (where it is correct -- that script
+# measures what a consumer receives, and an audit call there would be noise).
+#
+# The gap mattered less than it looks and more than it reads. Every runtime
+# surface is already pinned and hashed: zero JavaScript runtime dependencies,
+# 99/99 lockfile entries with sha512 integrity, uv.lock hashed on sdist and
+# every wheel, and both packages fetch nothing at install time. So an advisory
+# in a *dependency* cannot reach a consumer of either package.
+#
+# It can reach the publish path, which is the part worth watching. Dev
+# dependencies execute during `npm ci` in the same workflows that build what
+# gets published, and the actions themselves run with repository read access. A
+# stale pinned action SHA is invisible to every check in this repository --
+# nothing else here would ever tell us an action had a published advisory.
+#
+# Weekly rather than daily: these are pinned versions with no automatic
+# resolution, so the only thing a higher frequency buys is more pull requests
+# saying the same thing.
+version: 2
+updates:
+  # The pinned action SHAs. This is the ecosystem with no other safety net --
+  # the SHAs are verified against upstream by hand, once, and would otherwise
+  # sit unexamined indefinitely.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+
+  # Dev dependencies only -- the runtime count is asserted to be zero in CI, so
+  # anything Dependabot finds here is by definition a build-time or test-time
+  # package. `--ignore-scripts` is now passed everywhere, which removes the
+  # install-time execution vector, but these still run as code during a build.
+  - package-ecosystem: "npm"
+    directory: "/packages/js"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(js)"
+
+  # `xgboost` is pinned to an exact version on purpose and must not be bumped by
+  # a bot: the enumerated version ceiling exists because version drift here is
+  # silent, and 3.4.0-dev relocated a field that 3.3.0 then read as 0/400 rows
+  # correct with exit code 0 (D018, probes/version_drift.md). Any bump is a
+  # deliberate re-probe, so it is ignored here rather than left to a schedule.
+  - package-ecosystem: "pip"
+    directory: "/packages/python"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(py)"
+    ignore:
+      - dependency-name: "xgboost"

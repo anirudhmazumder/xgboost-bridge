@@ -161,11 +161,14 @@ of this library, not a gap to work around:
   require the input's keys to match the model's feature names exactly — no
   missing key, no extra key. See `COMPAT.md` for what that costs a caller
   whose input doesn't already have that shape.
-- **A non-finite (`±Infinity`) feature value** raises at prediction time.
-  `NaN` is accepted — it is XGBoost's missing-value marker and is routed by
-  the model's own `default_left` — but `±Infinity` is refused on both
-  sides, because upstream XGBoost is itself inconsistent about it (see
-  `COMPAT.md`).
+- **A feature value that is infinite in `float32`** raises at prediction time.
+  That is `±Infinity`, and also any finite float64 that narrows to it — `1e39`
+  is a legal double whose `float32` is `+inf`. Both predictors compare in
+  `float32`, so the two are the same value by the time any comparison happens,
+  and refusing only the first gave one mathematical value two behaviours
+  (D055). `NaN` is accepted — it is XGBoost's missing-value marker and is
+  routed by the model's own `default_left`. Infinity is refused on both sides
+  because upstream XGBoost is itself inconsistent about it (see `COMPAT.md`).
 
 Every one of these is backed by a fixture, tested independently on both
 sides of the language boundary. If a model or an input hits one of these

@@ -40,17 +40,27 @@ name: Release rehearsal (TestPyPI)
 #   3. `id-token: write` exists in one job, whose only steps are a download and
 #      the publish.
 #
-# NOT guaranteed by this file, and it must be configured in repository settings
-# before the first dispatch:
-#   4. `environment: testpypi` below is a *reference*. GitHub creates an
-#      environment on first use with NO protection rules, so unless the
-#      environment already exists and carries a required reviewer, this job
-#      publishes immediately and unreviewed. A previous version of this comment
-#      asserted the reviewer as a fact; it was not one.
-#   5. The Trusted Publisher entry on TestPyPI must itself name the environment.
-#      An entry registered for (repository, workflow) with the environment field
-#      left blank will accept a token minted from any environment, or none, so
-#      the binding has to exist on both sides to mean anything.
+# Configured in repository settings, and MEASURED rather than assumed on
+# 2026-08-06, because an earlier version of this comment asserted item 4 as a
+# fact while `gh api .../environments` returned `total_count: 0`:
+#   4. `environment: testpypi` resolves to an environment that exists and carries
+#      a `required_reviewers` protection rule. Verified:
+#        gh api repos/anirudhmazumder/xgboost-bridge/environments
+#          -> total_count: 2
+#             release:  protection_rules=required_reviewers
+#             testpypi: protection_rules=required_reviewers
+#      This matters because GitHub creates an environment on first reference with
+#      NO protection rules, so the name alone guarantees nothing -- a reference to
+#      a non-existent environment publishes immediately and unreviewed.
+#   5. The TestPyPI Trusted Publisher entry names the environment as well as the
+#      repository and the workflow filename. An entry with the environment field
+#      left blank accepts a token minted from any environment, or none, which
+#      would nullify item 4 -- so the binding exists on both sides.
+#      Registered as a pending publisher: project `xgboost-bridge`, owner
+#      `anirudhmazumder`, repository `xgboost-bridge`, workflow
+#      `release-testpypi.yml`, environment `testpypi`. The project name matches
+#      the manifest's `name` under PEP 503 normalisation, which is what PyPI
+#      compares on.
 on:
   workflow_dispatch:
     inputs:
@@ -74,6 +84,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read # deliberately no id-token: this job must not be able to publish
+    outputs:
+      version: ${{ steps.built.outputs.version }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -130,11 +142,25 @@ jobs:
       - name: Build the distributions to publish
         run: uv build packages/python --out-dir dist
 
+      # `pyproject.toml` declares `dynamic = ["version"]` and carries no literal
+      # `version =` -- hatchling reads it from _version.py (D057). Reading
+      # ['project']['version'] here therefore KeyErrors, which is what an earlier
+      # form of this step did.
+      #
+      # Read from the *installed package* instead: that is the value hatchling
+      # actually stamped into the wheel and into every artifact's provenance, so
+      # there is one source rather than a second parser that can disagree with it.
+      # Exported as a job output so the round trip pins the version that was
+      # built rather than re-deriving it -- the same argument as D015.
       - name: Show what is about to be published
+        id: built
         run: |
+          set -euo pipefail
           ls -l dist
-          echo "--- version being spent ---"
-          uv run python -c "import tomllib; print(tomllib.load(open('packages/python/pyproject.toml','rb'))['project']['version'])"
+          VERSION=$(uv run python -c "import xgboost_bridge; print(xgboost_bridge.__version__)")
+          echo "--- version being spent, permanently ---"
+          echo "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Hand the distributions to the publish job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -163,11 +189,18 @@ jobs:
           name: distributions
           path: dist/
 
+      # skip-existing is right HERE and wrong in release.yml. This workflow is a
+      # rehearsal whose value is in the round trip after the upload, and TestPyPI
+      # refuses re-upload of a version permanently -- so without this, a defect in
+      # the verification steps would cost a version number per attempt and the
+      # thing being rehearsed could never be iterated on. In release.yml, "this
+      # version already exists" is a real error and must stay loud.
       - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
+          skip-existing: true
 
   # ---------------------------------------------------------------------------
   # The round trip. This is the part that makes the rehearsal worth doing, and
@@ -175,7 +208,9 @@ jobs:
   # ---------------------------------------------------------------------------
   round_trip:
     name: Install from TestPyPI into a clean environment and predict
-    needs: publish
+    # `publish` for ordering, `verify` because this job reads its `version`
+    # output. Naming only `publish` would make the output silently empty.
+    needs: [verify, publish]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -188,41 +223,108 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install the published package and predict from it
+      - name: Install from TestPyPI and prove the artifact came from there
         run: |
           set -euo pipefail
-          VERSION=$(python -c "import tomllib; print(tomllib.load(open('packages/python/pyproject.toml','rb'))['project']['version'])")
+          # From the verify job, not re-parsed. Re-deriving it here is what made
+          # this step a sequencing hazard: with the manifest's version now
+          # dynamic, the old `tomllib` read KeyErrored -- and had only the earlier
+          # occurrence been fixed, this run would have spent the version on
+          # TestPyPI and *then* died before verifying anything.
+          VERSION="${{ needs.verify.outputs.version }}"
+          if [ -z "$VERSION" ]; then
+            echo "FAIL: the verify job exported no version"
+            exit 1
+          fi
           echo "verifying xgboost-bridge==$VERSION from TestPyPI"
 
           uv venv --python 3.12 /tmp/verify
 
-          # TestPyPI does not mirror numpy, so runtime dependencies must resolve
-          # from PyPI. --index-url selects TestPyPI for our package;
-          # --extra-index-url lets numpy come from the real index.
-          #
-          # Index propagation is not instant, so retry rather than fail on a
-          # race that says nothing about the package.
-          for attempt in 1 2 3 4 5 6; do
-            if uv pip install --python /tmp/verify/bin/python \
-                 --index-url https://test.pypi.org/simple/ \
-                 --extra-index-url https://pypi.org/simple/ \
-                 "xgboost-bridge==$VERSION"; then
-              echo "installed on attempt $attempt"
-              break
-            fi
-            if [ "$attempt" = "6" ]; then
-              echo "FAIL: could not install from TestPyPI after 6 attempts"
-              exit 1
-            fi
-            echo "not available yet; waiting 20s"
-            sleep 20
-          done
+          # Runtime dependencies from PyPI, before the index is closed off below.
+          # An earlier form used --index-url plus --extra-index-url with a comment
+          # claiming "TestPyPI does not mirror numpy" -- false: TestPyPI hosts
+          # numpy 1.9.3 and 2.4.0.dev0. Resolution succeeded only because neither
+          # satisfies a non-prerelease numpy>=1.24, so nothing matched there and it
+          # fell through. A coincidence, not a design.
+          uv pip install --python /tmp/verify/bin/python "numpy>=1.24"
 
-          # Predict from OUTSIDE the repository, so the installed package is
-          # what runs rather than the source tree.
+          # The chain, each link asserted rather than inferred. "uv pip install
+          # from an index" on its own proves almost nothing: it could resolve from
+          # PyPI, from a mirror, or from a warm cache, and the package would import
+          # and predict correctly in every case while testing nothing about the
+          # upload that just happened.
+          #
+          #   1. metadata lookup   -- TestPyPI's API knows this exact version
+          #   2. host assertion    -- the file URL is on test.pypi.org
+          #   3. digest match      -- the bytes we fetched are the bytes it recorded
+          #   4. --no-index install-- nothing can substitute another source
+          #   5. PEP 610 origin    -- the installed dist records that exact file
+          mkdir -p /tmp/fetched
+          python3 - "$VERSION" <<'CHAIN'
+          import hashlib, json, os, sys, time, urllib.request
+          from urllib.parse import urlparse
+
+          version = sys.argv[1]
+          api = f"https://test.pypi.org/pypi/xgboost-bridge/{version}/json"
+
+          # 1. Metadata lookup, with retries: index propagation is not instant, and
+          #    a 404 here is a race rather than a verdict.
+          payload = None
+          for attempt in range(1, 9):
+              try:
+                  with urllib.request.urlopen(api, timeout=30) as response:
+                      payload = json.load(response)
+                  print(f"metadata: found on attempt {attempt}")
+                  break
+              except Exception as failure:
+                  print(f"metadata: attempt {attempt} -> {type(failure).__name__}: {failure}")
+                  time.sleep(15)
+          if payload is None:
+              sys.exit(f"FAIL: TestPyPI has no metadata for xgboost-bridge=={version}")
+
+          wheels = [u for u in payload["urls"] if u["packagetype"] == "bdist_wheel"]
+          if not wheels:
+              sys.exit(f"FAIL: no wheel published for {version}; urls: "
+                       f"{[u['packagetype'] for u in payload['urls']]}")
+          wheel = wheels[0]
+
+          # 2. Host assertion. This is what distinguishes "installed from TestPyPI"
+          #    from "installed from somewhere that happened to have it".
+          host = urlparse(wheel["url"]).netloc
+          if not (host == "test.pypi.org" or host.endswith(".pythonhosted.org")):
+              sys.exit(f"FAIL: wheel is not hosted by TestPyPI: {wheel['url']}")
+          print(f"host      : {host}  ({wheel['filename']})")
+
+          # 3. Digest match on the bytes actually fetched.
+          with urllib.request.urlopen(wheel["url"], timeout=120) as response:
+              blob = response.read()
+          actual = hashlib.sha256(blob).hexdigest()
+          expected = wheel["digests"]["sha256"]
+          if actual != expected:
+              sys.exit(f"FAIL: sha256 mismatch\n  recorded {expected}\n  fetched  {actual}")
+          print(f"sha256    : {actual}  matches the digest TestPyPI recorded")
+
+          target = os.path.join("/tmp/fetched", wheel["filename"])
+          with open(target, "wb") as handle:
+              handle.write(blob)
+          print(f"saved     : {target} ({len(blob)} bytes)")
+          with open("/tmp/wheel-path", "w") as handle:
+              handle.write(target)
+          CHAIN
+
+          WHEEL=$(cat /tmp/wheel-path)
+
+          # 4. Install that file and nothing else. --no-index forbids any network
+          #    resolution, so no other source can satisfy this; --no-deps because
+          #    numpy is already present and must not be re-resolved.
+          uv pip install --python /tmp/verify/bin/python --no-index --no-deps "$WHEEL"
+
+          # 5 and the prediction, from OUTSIDE the repository so the installed
+          #    package is what runs rather than the source tree.
           cp fixtures/corpus/binary_logistic_signed_zero.json /tmp/fixture.json
           cat > /tmp/verify.py <<'PY'
           import json, pathlib, sys
+          from urllib.parse import unquote, urlparse
           import numpy as np
           import xgboost_bridge
           from xgboost_bridge import Predictor
@@ -231,6 +333,26 @@ jobs:
           assert "site-packages" in where.parts, f"not the installed package: {where}"
           print("installed at :", where)
           print("version      :", xgboost_bridge.__version__)
+
+          # 5. PEP 610: pip/uv record the origin of a direct install in
+          #    direct_url.json. This is what ties the imported module to the exact
+          #    file whose digest was checked above, rather than to "something that
+          #    got installed at some point".
+          dist_info = next(where.parent.parent.glob("xgboost_bridge-*.dist-info"))
+          origin = json.loads((dist_info / "direct_url.json").read_text())
+          print("PEP 610 url  :", origin["url"])
+          # Compare resolved paths, not URI strings. Measured locally: uv records
+          # `file:///tmp/...` while `Path.resolve()` yields `/private/tmp/...` on
+          # darwin, because /tmp is a symlink there. A string comparison would have
+          # passed on the Linux runner and been wrong for the wrong reason.
+          recorded = pathlib.Path(unquote(urlparse(origin["url"]).path)).resolve()
+          expected = pathlib.Path(sys.argv[1]).resolve()
+          assert recorded == expected, (
+              f"installed dist records {recorded}, not the verified wheel {expected}"
+          )
+          assert xgboost_bridge.__version__ == sys.argv[2], (
+              f"installed {xgboost_bridge.__version__}, expected {sys.argv[2]}"
+          )
 
           fixture = json.loads(pathlib.Path("/tmp/fixture.json").read_text())
           artifact = fixture["artifact"]
@@ -242,12 +364,16 @@ jobs:
                         for n, v in zip(artifact["feature_names"], row)}
               got = predictor.margin(values)
               want = int(fixture["expected_margin"][i], 16)
-              if int(np.float32(got).view(np.uint32)) == want:
+              got_bits = int(np.float32(got).view(np.uint32))
+              print(f"  row {i}: margin 0x{got_bits:08X} vs ground truth 0x{want:08X}"
+                    f"  {'ok' if got_bits == want else 'MISMATCH'}")
+              if got_bits == want:
                   ok += 1
 
           print(f"margin bit-exact vs XGBoost ground truth: {ok}/{len(fixture['rows'])}")
           if ok != len(fixture["rows"]):
               sys.exit("FAIL: the published package does not reproduce the recorded margins")
-          print("ROUND TRIP OK: published, installed from TestPyPI, and bit-exact")
+          print("ROUND TRIP OK: published, fetched from TestPyPI by digest, installed "
+                "with no index, and bit-exact against committed ground truth")
           PY
-          cd /tmp && /tmp/verify/bin/python /tmp/verify.py
+          cd /tmp && /tmp/verify/bin/python /tmp/verify.py "$WHEEL" "$VERSION"

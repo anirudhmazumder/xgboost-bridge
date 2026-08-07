@@ -125,15 +125,25 @@ jobs:
 
       # Packed here rather than in the credentialed job, so that job needs no
       # node_modules and runs no install script.
+      #
+      # Order-dependent, deliberately: `--pack-destination` into a directory that
+      # does not exist fails with ENOENT, and `uv build --out-dir dist` above is
+      # what creates it. Do not move this step earlier.
       - name: Pack the npm tarball
         working-directory: packages/js
         run: npm pack --pack-destination ../../dist
 
+      # Read from the installed package, not from the manifest: `pyproject.toml`
+      # declares `dynamic = ["version"]` and carries no literal `version =`
+      # (D057), so ['project']['version'] KeyErrors -- which is what an earlier
+      # form of this step did, and it would have failed the first ever run after
+      # the whole gate had passed.
       - name: Show exactly what would be published
         run: |
+          set -euo pipefail
           ls -l dist
           echo "--- versions being spent, permanently ---"
-          uv run python -c "import tomllib; print('python:', tomllib.load(open('packages/python/pyproject.toml','rb'))['project']['version'])"
+          echo "python: $(uv run python -c 'import xgboost_bridge; print(xgboost_bridge.__version__)')"
           node -p "'npm:    ' + require('./packages/js/package.json').version"
 
       - name: Hand the distributions to the publish jobs
@@ -204,11 +214,22 @@ jobs:
           name: distributions
           path: dist/
 
+      # `--tag` is not cosmetic. npm bundled with Node 20 is 10.8.2, which has no
+      # prerelease guard: `npm publish` of 1.0.0-rc.1 with no tag publishes to
+      # `latest`, so `npm i xgboost-predictor` would install a release candidate.
+      # npm 11 throws "You must specify a tag using --tag when publishing a
+      # prerelease version" -- so the mistake is loud on the npm we will not get
+      # and silent on the one we will. PyPI needs no equivalent: `1.0.0rc1` is a
+      # PEP 440 prerelease and pip declines to select it by default. The
+      # asymmetry was the bug.
+      #
+      # `publishConfig.tag` in package.json says the same thing, so both npm
+      # versions behave identically whether or not this flag is passed.
       - name: Publish the packed tarball
         run: |
           set -euo pipefail
           TARBALL=$(ls dist/*.tgz)
           echo "publishing $TARBALL"
-          npm publish "$TARBALL" --access public --provenance
+          npm publish "$TARBALL" --access public --provenance --tag rc
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

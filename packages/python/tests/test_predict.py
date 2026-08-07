@@ -1086,8 +1086,25 @@ def test_a_self_loop_raises() -> None:
         Predictor.from_json(artifact)
 
 
-def test_a_shared_subtree_is_not_refused() -> None:
-    """Two parents, one child, no cycle: it terminates, so it is not refused."""
+def test_a_shared_subtree_is_refused() -> None:
+    """Two parents, one child, no cycle: refused, because it is not a tree (D058).
+
+    **This test previously asserted the opposite**, on the reasoning that such a
+    structure terminates and so was not the termination check's business. That is
+    true and was the wrong test. The structure is a directed acyclic graph, and
+    no XGBoost model is one -- measured, the maximum in-degree across all 582
+    fixture trees and 3258 nodes is 1, so refusing costs nothing this exporter
+    can produce.
+
+    What the old behaviour cost: a hand-edited or third-party artifact that
+    shared a child by accident -- an off-by-one while remapping indices -- loaded
+    and returned a *plausible* margin from the silently shared subtree. Both
+    readers did, and returned the same number, so cross-language parity could
+    never have caught it. Agreement is not correctness.
+
+    The margin the old version asserted is still exactly computable, which is the
+    point: nothing about the number looks wrong.
+    """
     artifact = _worked_example()
     artifact["trees"][0] = {
         "default_left": [1, 1, 0, 0],
@@ -1096,11 +1113,27 @@ def test_a_shared_subtree_is_not_refused() -> None:
         "right_children": [2, 3, 3, -1],
         "split_indices": [0, 0, 0, 0],
     }
+    with pytest.raises(errors.MalformedTreeError) as caught:
+        Predictor.from_json(artifact)
+    assert caught.value.field == "left_children"
+    assert "one parent" in str(caught.value)
+
+
+def test_the_shared_subtree_refusal_does_not_reject_an_ordinary_tree() -> None:
+    """The bound must not creep: a normal tree has in-degree 1 everywhere, and
+    every fixture must still load. Without this, a check written as `>= 1` rather
+    than `> 1` would reject every artifact and this suite would say so only
+    through unrelated failures."""
+    artifact = _worked_example()
+    artifact["trees"][0] = {
+        "default_left": [1, 0, 0],
+        "left_children": [1, -1, -1],
+        "node_values": [0.5, -0.5, 0.25],
+        "right_children": [2, -1, -1],
+        "split_indices": [0, 0, 0],
+    }
     predictor = Predictor.from_json(artifact)
-    margin = predictor.margin({"feature_a": 0.1, "feature_b": 0.0})
-    assert _bits(margin) == _bits(
-        np.float32(np.float32(np.float32(0.40546515583992004) + np.float32(-0.5)) + np.float32(0.125))
-    )
+    assert math.isfinite(float(predictor.margin({"feature_a": 0.1, "feature_b": 0.0})))
 
 
 def test_a_node_unreachable_from_the_root_does_not_raise() -> None:

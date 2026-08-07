@@ -50,7 +50,8 @@
   },
   "publishConfig": {
     "access": "public",
-    "provenance": true
+    "provenance": true,
+    "tag": "rc"
   },
   "repository": {
     "type": "git",
