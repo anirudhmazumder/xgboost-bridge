@@ -64,6 +64,18 @@ on:
           - both
           - npm-only
           - pypi-only
+      allow_partial:
+        description: >-
+          Permit a non-prerelease to target ONE registry. Leave false for a
+          release. Its only legitimate use is completing a split: if `both` ships
+          one registry and then fails on the other, 1.0.0 is already spent there
+          and a re-dispatch would fail on the duplicate before reaching the one
+          that still needs publishing. Without this, recovering from that state
+          would mean editing this workflow under pressure, immediately after a
+          partial release -- which is the worst possible moment to be editing it.
+        required: true
+        default: false
+        type: boolean
 
 # Least privilege, stated rather than inherited. Once any scope is named,
 # every unnamed scope becomes `none` -- so a job declaring only
@@ -194,8 +206,13 @@ jobs:
           ' "$VERSION")
           echo "prerelease: $IS_PRERELEASE"
           if [ "$IS_PRERELEASE" = "no" ] && [ "${{ inputs.targets }}" != "both" ]; then
-            echo "FAIL: $VERSION is not a prerelease, so targets must be 'both'"
-            exit 1
+            if [ "${{ inputs.allow_partial }}" != "true" ]; then
+              echo "FAIL: $VERSION is not a prerelease, so targets must be 'both'"
+              echo "  (set allow_partial=true only to complete a split release)"
+              exit 1
+            fi
+            echo "WARNING: publishing a non-prerelease to ${{ inputs.targets }} only."
+            echo "  This is legitimate ONLY to complete a split release."
           fi
 
       - name: Hand the distributions to the publish jobs
@@ -390,11 +407,27 @@ jobs:
           fi
           echo "no npm credential configured -- OIDC exchange will be used"
 
-          echo "publishing $TARBALL"
+          # The dist-tag is DERIVED from the version, not fixed. A hardcoded
+          # `--tag rc` was right for every rehearsal and wrong for a release: it
+          # would put 1.0.0 on the `rc` tag and leave `latest` stranded on
+          # 1.0.0-rc.1 permanently, which is the wrong-version-installed path this
+          # pipeline exists to close.
+          #
+          # Caught by this repository's own test -- "the manifest declares a
+          # prerelease version while the rc tag is in force" -- which went red the
+          # moment the version stopped being a prerelease, before any dispatch.
+          VERSION="${{ needs.verify.outputs.npm_version }}"
+          if node -e 'process.exit(/-(?:rc|alpha|beta)\./.test(process.argv[1]) ? 0 : 1)' "$VERSION"; then
+            TAG=rc
+          else
+            TAG=latest
+          fi
+
+          echo "publishing $TARBALL as $VERSION under dist-tag $TAG"
           # No NODE_AUTH_TOKEN. npm exchanges the Actions OIDC token for a
           # short-lived credential, which is why `id-token: write` is declared on
           # this job and why the job runs nothing else.
-          npm publish "$TARBALL" --access public --provenance --tag rc
+          npm publish "$TARBALL" --access public --provenance --tag "$TAG"
 
       # ---------------------------------------------------------------------
       # What the dist-tags actually point at, after the upload. Nothing verified

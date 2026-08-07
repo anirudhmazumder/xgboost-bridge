@@ -161,27 +161,55 @@ test("release.yml publishes the RC under a non-default dist-tag", () => {
     .filter((line) => line.startsWith("npm publish"));
 
   assert.equal(publishLines.length, 1, `expected one npm publish line, got ${publishLines.length}`);
+  // The tag must be passed and must be DERIVED, not hardcoded. A fixed `--tag rc`
+  // was correct for every rehearsal and wrong for a release: it would put 1.0.0 on
+  // the `rc` tag and strand `latest` on the last prerelease. `publishConfig.tag`
+  // does not cover for the flag being absent -- measured, it is not honoured.
   assert.match(
     publishLines[0],
-    /--tag\s+rc\b/,
-    "npm publish must carry --tag rc; publishConfig.tag does not cover for it",
+    /--tag\s+"\$[A-Z_]+"/,
+    "npm publish must pass --tag from a variable derived from the version",
   );
   assert.match(publishLines[0], /--provenance\b/, "the release publish must request provenance");
+  assert.match(
+    workflow,
+    /TAG=rc[\s\S]{0,120}TAG=latest/,
+    "the tag must be chosen by whether the version is a prerelease",
+  );
 });
 
-test("the manifest declares a prerelease version while the rc tag is in force", () => {
+test("the dist-tag the workflow would choose matches the manifest version", () => {
+  // This replaces an assertion that the version must BE a prerelease, which was
+  // correct while `--tag rc` was hardcoded and did its job by going red the moment
+  // 1.0.0 was staged. Now that the tag is derived, the property worth pinning is
+  // the derivation: a prerelease takes `rc`, a final release takes `latest`.
   const manifest = JSON.parse(
     readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   );
-  // If the version ever stops being a prerelease, `--tag rc` becomes wrong rather
-  // than protective, and this says so instead of silently publishing 1.0.0 to rc.
   const isPrerelease = /-(?:rc|alpha|beta)\./.test(manifest.version);
-  assert.equal(
-    isPrerelease,
-    true,
-    `version ${manifest.version} is not a prerelease, so --tag rc in release.yml ` +
-      `would hide a final release behind a non-default tag`,
+  const expected = isPrerelease ? "rc" : "latest";
+
+  const workflow = readFileSync(
+    new URL("../../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
   );
+  // Reproduce the workflow's own test, so the two cannot drift.
+  const workflowRegex = /\/-\(\?:rc\|alpha\|beta\)\\\.\//;
+  assert.match(workflow, workflowRegex, "the workflow must classify prereleases the same way");
+
+  assert.equal(
+    expected,
+    isPrerelease ? "rc" : "latest",
+    `version ${manifest.version} should publish under ${expected}`,
+  );
+  if (!isPrerelease) {
+    // The case that matters at release time: `latest` must end up on this version.
+    assert.match(
+      workflow,
+      /latest !== version/,
+      "release.yml must assert that latest points at a final release",
+    );
+  }
 });
 
 test("release.yml passes npm publish an unambiguous path, not a bare relative one", () => {
