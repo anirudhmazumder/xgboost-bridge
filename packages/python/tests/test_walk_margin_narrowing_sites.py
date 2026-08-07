@@ -1,8 +1,19 @@
-"""Pin the two narrowing sites inside `walk_margin`, each on its own.
+"""Pin the narrowing sites inside `walk_margin` — one independently, one as a set.
 
 Found by `tools/revert_harness.py` on its first run: reverting the threshold-side
 cast, and reverting the accumulator's narrowing, both left the suite **green**.
 That is the finding the harness exists to produce, and it was not a false alarm.
+
+The two turned out to be different in kind, which is worth stating up front
+because the obvious reading — "two untested protections, write two tests" — is
+wrong for the second one:
+
+* the **threshold-side cast** is independently load-bearing, and is now pinned by
+  itself;
+* the **accumulator's float32 discipline** rests on three overlapping narrowings,
+  any one of which is sufficient alone. No single-site revert is detectable, by
+  construction rather than by oversight. That one is pinned as a *set*, and the
+  limit is recorded rather than dressed up as a pin.
 
 Why nothing noticed. Every tree the `Predictor` builds has already been narrowed at
 parse time, so inside `walk_margin` the threshold is *already* `np.float32` and
@@ -27,8 +38,10 @@ threshold gets narrowed by the comparison itself and hides the defect. A
 `np.float64` is strongly typed and promotes to float64. The same input, spelled two
 ways, exposes or conceals the bug -- so these tests spell it deliberately.
 
-Per CLAUDE.md these are pinned **independently**. Reverting both narrowing sites
-at once pins neither, because each can absorb the other's failure.
+CLAUDE.md requires each protection be pinned **independently**, and warns that
+reverting two at once pins neither. This file honours that where it is achievable
+and says so plainly where it is not, which is the only useful thing to do with a
+rule that a piece of code cannot satisfy.
 """
 
 from __future__ import annotations
