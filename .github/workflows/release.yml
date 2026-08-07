@@ -200,10 +200,19 @@ jobs:
       # credential -- same shape as the PyPI job above.
       id-token: write
     steps:
-      - name: Set up Node.js 20 with the npm registry
+      # Node 24 in THIS job only, and deliberately not in `verify`. npm's trusted
+      # publishing requires npm >= 11.5.1 AND Node >= 22.14.0, and Node 20 bundles
+      # npm 10.8.2 -- so upgrading npm in place on Node 20, which an earlier form
+      # of this job did, satisfies one requirement and not the other.
+      #
+      # Changing the Node used for the BUILD to change a publish mechanism would
+      # be the wrong trade, and it is unnecessary: this job builds nothing. It
+      # uploads a tarball that `verify` already packed under Node 20, so the
+      # artifact is unaffected by the version here.
+      - name: Set up Node.js 24 with the npm registry
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
       - name: Collect the tarball packed by the verify job
@@ -225,11 +234,42 @@ jobs:
       # `publishConfig.tag` in package.json says the same thing, so the behaviour
       # does not depend on this flag being remembered. PyPI needs no equivalent:
       # `1.0.0rc1` is a PEP 440 prerelease and pip declines it by default.
-      - name: Upgrade npm to a version that supports Trusted Publishing
+      # Asserted rather than assumed. Node 24 bundles npm 11.x today; if a runner
+      # image ever regresses that, this fails with the actual versions instead of
+      # letting the registry return a token-shaped error, which is the confusing
+      # failure. Both floors are npm's documented requirements for trusted
+      # publishing: npm >= 11.5.1 AND Node >= 22.14.0 -- so upgrading npm in place
+      # on Node 20, which an earlier form of this job did, satisfies one and not
+      # the other.
+      #
+      # The comparison is exercised locally before landing, on v20.19.0/v24.7.0 and
+      # npm 10.8.2/11.5.1/11.6.0, because `return` at the top level of `node
+      # --eval` is a syntax error and the first version of this used one.
+      - name: Require versions that support Trusted Publishing
         run: |
           set -euo pipefail
-          npm install -g npm@11.5.1
-          npm --version
+          echo "node $(node --version), npm $(npm --version)"
+          CHECK='
+            const cmp = (a, b) => {
+              const x = a.split(".").map(Number);
+              const y = b.split(".").map(Number);
+              for (let i = 0; i < 3; i += 1) {
+                const l = x[i] ?? 0;
+                const r = y[i] ?? 0;
+                if (l !== r) return l - r;
+              }
+              return 0;
+            };
+            const need = process.argv[1];
+            const got = process.argv[2].replace(/^v/, "");
+            const label = process.argv[3];
+            if (cmp(got, need) < 0) {
+              throw new Error(label + " " + got + " is below the required " + need);
+            }
+            console.log(label + " " + got + " satisfies >= " + need);
+          '
+          node --eval "$CHECK" 22.14.0 "$(node --version)" node
+          node --eval "$CHECK" 11.5.1 "$(npm --version)" npm
 
       - name: Publish the packed tarball
         run: |
