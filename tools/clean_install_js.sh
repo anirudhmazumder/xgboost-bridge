@@ -69,6 +69,44 @@ if (forbidden.length) {
 }
 console.log("   no src/ or test/ paths in the tarball (the source itself ships inside dist/*.map -- see the note above)");
 
+// Sourcemaps are a decision (D056), not a default, so the properties that make
+// shipping them safe are asserted rather than re-checked by hand each release:
+// they must be present, they must carry the source inline (the `sources` entries
+// are relative `../src/*.ts` paths that are NOT shipped, so a map without
+// `sourcesContent` would be dead weight), and they must contain no absolute
+// path -- which is what would turn "we ship our source" into "we ship the
+// maintainer's directory layout".
+const maps = names.filter((n) => n.endsWith(".map"));
+if (maps.length !== 2) {
+  console.error(`FAIL: expected 2 sourcemaps in the tarball, found ${maps.length}`);
+  process.exit(1);
+}
+for (const mapName of maps) {
+  // Entries are prefixed with `package/` inside the tarball, as the export-map
+  // check below also relies on; `names` has that prefix stripped.
+  const raw = execFileSync("tar", ["-xzOf", tarball, `package/${mapName}`], { encoding: "utf8" });
+  const map = JSON.parse(raw);
+  if (!Array.isArray(map.sourcesContent) || map.sourcesContent.length === 0) {
+    console.error(`FAIL: ${mapName} has no sourcesContent, so its mappings are dead`);
+    process.exit(1);
+  }
+  const absolute = (map.sources || []).filter((src) => src.startsWith("/") || /^[A-Za-z]:\\/.test(src));
+  if (absolute.length > 0) {
+    console.error(`FAIL: ${mapName} carries absolute paths: ${absolute.join(", ")}`);
+    process.exit(1);
+  }
+  if (map.sourceRoot) {
+    console.error(`FAIL: ${mapName} sets sourceRoot (${map.sourceRoot}), which can leak a local layout`);
+    process.exit(1);
+  }
+  const leaked = raw.match(/\/(Users|home)\/[A-Za-z0-9_.-]+/g);
+  if (leaked) {
+    console.error(`FAIL: ${mapName} contains a local filesystem path: ${leaked[0]}`);
+    process.exit(1);
+  }
+}
+console.log(`   ${maps.length} sourcemaps ship deliberately (D056): source inline, no absolute paths`);
+
 // The export map must point only at files that are actually inside.
 const pkgRaw = execFileSync("tar", ["-xzOf", tarball, "package/package.json"], { encoding: "utf8" });
 const pkg = JSON.parse(pkgRaw);

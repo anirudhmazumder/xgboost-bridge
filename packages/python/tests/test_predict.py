@@ -34,6 +34,7 @@ from __future__ import annotations
 import ast
 import json
 import math
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -1800,3 +1801,69 @@ def test_the_huge_integer_really_does_overflow_an_unguarded_cast() -> None:
         np.float32(_HUGE_JSON_INTEGER)
     # And the value is genuinely beyond float64, not merely beyond float32.
     assert _HUGE_JSON_INTEGER > int(np.finfo(np.float64).max)
+
+
+# ---------------------------------------------------------------------------
+# A finite float64 that is infinite in float32 is refused (D055)
+#
+# The guard used to test the float64 for `±inf`, so `1e39` -- a legal float64
+# whose float32 is `+inf` -- went straight through and the walk compared `inf`
+# against thresholds and returned a number. Same mathematical value as an
+# explicit infinity by the time any comparison happens, two behaviours, neither
+# raising. numpy also warned "overflow encountered in cast" 1,160 times in a
+# 100,000-row parity run, which was the evidence the path was unintentional.
+#
+# `NaN` must stay accepted: it is the missing value.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        1e39,
+        -1e39,
+        1e300,
+        -1e300,
+        float(np.finfo(np.float64).max),
+        3.4028235677973366e38,  # first float64 above float32's max, so f32 -> inf
+    ],
+)
+def test_a_feature_value_infinite_in_float32_is_refused(value: float) -> None:
+    predictor = Predictor.from_json(_worked_example())
+    row = {name: 0.5 for name in predictor.feature_names}
+    row[predictor.feature_names[0]] = value
+
+    # The premise: finite as float64, infinite once narrowed. Without this the
+    # test could pass for the wrong reason on a platform with a wider float.
+    assert math.isfinite(value)
+    with np.errstate(over="ignore"):
+        assert np.isinf(np.float32(value))
+
+    with pytest.raises(errors.NonFiniteFeatureError) as caught:
+        predictor.margin(row)
+    assert caught.value.index == 0
+
+
+@pytest.mark.parametrize("value", [3.4028234663852886e38, -3.4028234663852886e38, 1e30])
+def test_the_largest_finite_float32_is_still_accepted(value: float) -> None:
+    """The refusal must not creep inward. These narrow to a finite float32 and
+    are ordinary inputs; a guard written as `abs(value) > f32_max` rather than a
+    narrow-then-test would reject the boundary itself."""
+    predictor = Predictor.from_json(_worked_example())
+    row = {name: 0.5 for name in predictor.feature_names}
+    row[predictor.feature_names[0]] = value
+    assert np.isfinite(np.float32(value))
+    assert math.isfinite(float(predictor.margin(row)))
+
+
+def test_refusing_an_overflowing_feature_emits_no_warning() -> None:
+    """The raise is the report. Emitting a numpy overflow warning *and* raising
+    is two reports of one problem, and only the raise is actionable."""
+    predictor = Predictor.from_json(_worked_example())
+    row = {name: 0.5 for name in predictor.feature_names}
+    row[predictor.feature_names[0]] = 1e39
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(errors.NonFiniteFeatureError):
+            predictor.margin(row)
+    assert [w for w in caught if w.category is RuntimeWarning] == []

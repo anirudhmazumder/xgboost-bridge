@@ -317,7 +317,19 @@ export class Predictor {
       if (typeof value !== "number") {
         throw new MalformedArtifactError(`<row>.${name}`, value, "a number");
       }
-      if (value === Infinity || value === -Infinity) {
+      // Narrow first, then refuse an infinite result. Testing `value` itself for
+      // `±Infinity` let a finite float64 that *becomes* infinite through this
+      // library's own required narrowing straight through: `1e39` is a legal
+      // float64, `Math.fround(1e39)` is `Infinity`, and the walk then compared
+      // `Infinity` against thresholds and returned a number. Same mathematical
+      // value as an explicit infinity, two different behaviours, no error
+      // either way (D055).
+      //
+      // `NaN` is deliberately not caught here: `Math.fround(NaN)` is `NaN`,
+      // which is neither `Infinity` nor `-Infinity`, so the missing value still
+      // reaches the walk and routes by the tree's default direction.
+      const narrowed = Math.fround(value);
+      if (narrowed === Infinity || narrowed === -Infinity) {
         throw new NonFiniteFeatureError(index, name, value);
       }
       values[index] = value;

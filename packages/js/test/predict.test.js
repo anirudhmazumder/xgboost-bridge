@@ -644,3 +644,60 @@ test("the constructor still accepts what fromJSON produced", () => {
   const predictor = new Predictor(loaded);
   assert.equal(typeof predictor.margin, "function");
 });
+
+// ---------------------------------------------------------------------------
+// A finite float64 that is infinite in float32 is refused (D055)
+//
+// The guard used to test `value` itself for `±Infinity`, so `1e39` -- a legal
+// float64 whose `Math.fround` is `Infinity` -- went straight through and the
+// walk compared `Infinity` against thresholds and returned a number. Same
+// mathematical value as an explicit infinity by the time any comparison
+// happens, two behaviours, neither raising.
+//
+// The Python side refuses exactly these, which the parity harness confirms as
+// refusal agreement rather than as matching values.
+// ---------------------------------------------------------------------------
+
+for (const value of [
+  1e39,
+  -1e39,
+  1e300,
+  -1e300,
+  Number.MAX_VALUE,
+  3.4028235677973366e38, // first float64 above float32's max
+]) {
+  test(`a feature value infinite in float32 is refused: ${value}`, () => {
+    const predictor = fromJSON(stumpArtifact(0.25, [1.5]));
+    const name = predictor.featureNames[0];
+
+    // The premise, asserted rather than assumed: finite as float64, infinite
+    // once narrowed.
+    assert.ok(Number.isFinite(value), "input must be a finite float64");
+    assert.ok(!Number.isFinite(Math.fround(value)), "must narrow to infinity");
+
+    assert.throws(
+      () => predictor.margin({ [name]: value }),
+      (error) => error instanceof NonFiniteFeatureError && error.index === 0,
+    );
+  });
+}
+
+for (const value of [3.4028234663852886e38, -3.4028234663852886e38, 1e30]) {
+  test(`the largest finite float32 is still accepted: ${value}`, () => {
+    // The refusal must not creep inward. A guard written as
+    // `Math.abs(value) > F32_MAX` rather than narrow-then-test would reject the
+    // boundary value itself.
+    const predictor = fromJSON(stumpArtifact(0.25, [1.5]));
+    const name = predictor.featureNames[0];
+    assert.ok(Number.isFinite(Math.fround(value)));
+    assert.ok(Number.isFinite(predictor.margin({ [name]: value })));
+  });
+}
+
+test("NaN is still the missing value, not an overflow", () => {
+  const predictor = fromJSON(stumpArtifact(0.25, [1.5]));
+  const name = predictor.featureNames[0];
+  // Math.fround(NaN) is NaN, which is neither Infinity nor -Infinity, so the
+  // narrow-then-test guard must let it through.
+  assert.ok(Number.isFinite(predictor.margin({ [name]: NaN })));
+});

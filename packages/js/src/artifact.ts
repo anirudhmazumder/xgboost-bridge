@@ -97,8 +97,15 @@ export class MalformedArtifactError extends PredictorError {
 }
 
 /**
- * Raised when a prediction input carries `+Infinity` or `-Infinity` (D022,
- * D045).
+ * Raised when a prediction input carries a value that is infinite **in float32**
+ * (D022, D045, D055).
+ *
+ * That is `±Infinity`, and also any finite float64 that narrows to infinity —
+ * `1e39` is a legal float64 and `Math.fround(1e39)` is `Infinity`. Both are
+ * refused, because this package compares in float32 and the two are the same
+ * value by the time any comparison happens. Refusing only the first let the
+ * second through: it routed against `Infinity` and returned a number, so one
+ * mathematical value had two behaviours and neither raised.
  *
  * `NaN` is *not* an error: it is the missing value and routes by
  * `default_left`. Infinity is refused because upstream is genuinely
@@ -117,14 +124,14 @@ export class NonFiniteFeatureError extends PredictorError {
   public readonly index: number;
   /** Feature name of the offending value. */
   public readonly feature: string;
-  /** The offending value, `Infinity` or `-Infinity`. */
+  /** The offending value as given, before narrowing: `±Infinity`, or a finite float64 that is infinite in float32. */
   public readonly value: number;
 
   constructor(index: number, feature: string, value: number) {
     super(
       "NON_FINITE_FEATURE",
       `Non-finite feature value: "${feature}" (column ${index}) is ${String(value)}. ` +
-        "NaN is the missing value and is accepted; infinity is refused.",
+        "NaN is the missing value and is accepted. Infinity is refused, and so is a finite value that is infinite in float32 -- this library compares in float32.",
     );
     this.name = "NonFiniteFeatureError";
     this.index = index;

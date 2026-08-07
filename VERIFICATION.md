@@ -97,7 +97,7 @@ Refusing loudly is a feature. Each refusal exists because the alternative is a p
 | Models with no feature names | A strict-key policy with no keys to check reads as enforced and is not |
 | Early-stopped models with an ambiguous tree count | The effective count is not a property of the model: the same file answers differently loaded as a `Booster` versus through the scikit-learn estimator, diverging by `1.55`, with no field distinguishing them |
 | XGBoost versions outside the tested list | Version drift here is silent — 3.4.0-dev relocated a field, and 3.3.0 reads such a model returning **0 of 400 rows correct at max error 1.26, with no warning and exit code 0** |
-| `±inf` feature values | Upstream is itself inconsistent, as above |
+| Feature values infinite **in float32** | `±inf`, and any finite float64 that narrows to infinity (`1e39`). Upstream is itself inconsistent about infinity, as above; and since this library compares in float32, the two are the same value by the time any comparison happens — refusing only the first gave one mathematical value two behaviours |
 | Non-finite intercepts | Reachable and silent: Cox at `base_score=0.0` gives `-inf`, and at any negative value `NaN`, both accepted by XGBoost without complaint |
 
 `NaN` is **not** refused. It is the missing value, and it routes by the tree's default direction.
@@ -160,7 +160,6 @@ A second, smaller difference: for `survival:cox` at a negative `base_score`, XGB
 - The **scikit-learn `XGBClassifier` export path is unmeasured.** The arity checks were verified against `xgboost.train` models only.
 - The **`save_best=True` early-stopping callback is unmeasured.** If it trims the model, export proceeds — which is safe, because a trimmed model is unambiguous — but that is inferred, not observed.
 - The **exact mechanism of the logistic clamp** is undecidable by measurement: an input clamp and an output floor are observationally identical, and an upper clamp is undetectable because both forms give exactly `1.0`. The constant is pinned; the mechanism is not.
-- **A feature value that is finite as float64 but infinite once narrowed is accepted, while an explicitly infinite one is refused.** `1e39` is a legal float64; narrowed to `float32` it is `+inf`, and the walk then compares `inf` against thresholds and routes consistently. Both predictors agree on every such row — the 100,000-row parity run includes them and reports `0` mismatches — so this is not a cross-language defect. But it is an inconsistency in the refusal: `±inf` arriving directly raises, and `1e39` arriving and *becoming* `inf` does not. Python also emits `RuntimeWarning: overflow encountered in cast` on those rows, 1,160 times in the scale run, which the harness counts rather than letting scroll past. Whether such a value should be refused is an open behavioural question, not a resolved one.
 - **Two artifact refusals are impossible in JavaScript.** `format_version: 1.0` is indistinguishable from `1` after `JSON.parse`. The Python reader rejects it; the JavaScript reader cannot.
 
 ### The evidence itself is committed

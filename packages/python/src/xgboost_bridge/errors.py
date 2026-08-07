@@ -475,7 +475,14 @@ class NonFiniteInterceptError(XGBoostBridgeError):
 
 
 class NonFiniteFeatureError(XGBoostBridgeError):
-    """Raised when a prediction input carries an infinite feature value.
+    """Raised when a prediction input carries a value infinite **in float32**.
+
+    That is ``±inf``, and also any finite float64 that narrows to infinity --
+    ``1e39`` is a legal float64 and ``np.float32(1e39)`` is ``inf``. Both are
+    refused, because this library compares in float32 and by then the two are
+    the same value. Refusing only the first let the second through: it routed
+    against ``inf`` and returned a number, so one mathematical value had two
+    behaviours and neither raised (D055).
 
     ``NaN`` is **not** an error: it is the missing value, and it routes by the
     node's ``default_left``. Only infinities raise.
@@ -502,6 +509,8 @@ class NonFiniteFeatureError(XGBoostBridgeError):
         self.index = index
         self.value = value
         super().__init__(
-            f"feature at index {index} is {value!r}; infinite feature values "
-            "are refused (NaN is the missing value and is accepted)"
+            f"feature at index {index} is {value!r}, which is infinite in "
+            "float32; this library compares in float32, so a finite float64 "
+            "that narrows to infinity is refused the same way an explicit "
+            "infinity is (NaN is the missing value and is accepted)"
         )

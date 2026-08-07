@@ -301,7 +301,9 @@ when passed through `inplace_predict`. The same input can therefore produce
 two different predictions from the same fitted XGBoost model depending only
 on which call path was used to get a prediction out of it.
 (`probes/tree_structure.md` §6.1) This library does not try to reproduce
-both behaviors. It picks one — a non-finite feature value **raises** — and
+both behaviors. It picks one — a feature value that is infinite **in float32**
+**raises**, which covers `±inf` and any finite float64 that narrows to
+infinity, such as `1e39` (D055) — and
 pins that choice with a fixture. (D022) Surfacing exactly this class of
 call-path-dependent divergence is why this library exists; it is recorded
 here as an upstream hazard rather than a defect in this library.

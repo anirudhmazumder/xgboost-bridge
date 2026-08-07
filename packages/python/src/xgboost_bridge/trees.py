@@ -539,9 +539,25 @@ def walk_margin(
     # the same invalid input raise or not depending on which branches this
     # particular tree takes, i.e. a property of the model rather than of the
     # input. Cost is O(features) against an O(depth x trees) walk. See D022.
-    for index, value in enumerate(feature_values):
-        if value == np.inf or value == -np.inf:
-            raise NonFiniteFeatureError(index, float(value))
+    # Narrow first, then refuse an infinite result. Testing the float64 for
+    # `±inf` instead let a finite float64 that *becomes* infinite through this
+    # library's own required narrowing straight through: `1e39` is a legal
+    # float64, `f32(1e39)` is `+inf`, and the walk then compared `inf` against
+    # thresholds and returned a number. Same mathematical value as an explicit
+    # infinity, two different behaviours, and no error either way -- which is
+    # the class of silent inconsistency this library exists to remove (D055).
+    #
+    # `np.isinf` rather than `not np.isfinite`, because `NaN` narrows to `NaN`
+    # and must be *accepted*: it is the missing value and routes by the tree's
+    # default direction.
+    #
+    # errstate: the cast warns "overflow encountered in cast" on exactly the
+    # inputs now being refused. Emitting a numpy warning and then raising is two
+    # reports of one problem, and the raise is the one a caller can act on.
+    with np.errstate(over="ignore"):
+        for index, value in enumerate(feature_values):
+            if np.isinf(np.float32(value)):
+                raise NonFiniteFeatureError(index, float(value))
 
     accumulator = np.float32(intercept)
 

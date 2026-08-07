@@ -6,6 +6,42 @@ Format: what was decided, what forced it, what it costs.
 
 ---
 
+## General principles
+
+Two rules generalize past the entries that produced them, and both are here because
+each was learned by getting it wrong in a way that looked correct. They are the same
+shape with a different noun.
+
+**1. Every check needs an oracle independent of what it checks.** Before accepting any
+validation, state what its oracle is and why the oracle cannot share the defect. If the
+answer is "it compares our value to our other value," the check is decorative — delete
+it or replace it. Found by D034: an export assertion compared a derived intercept
+against a re-derivation of the same recipe, so a recipe error could not make it fire,
+and it passed the real clamping defect of D035. Applied since to sampling (D040 — a
+sample that does not target the disagreeing inputs cannot distinguish two
+implementations), to the parity comparison layer (D047 — a check that cannot tell
+"equal" from "both unparseable" is not a check), and to the intercept itself (D053 —
+once the value comes *from* the oracle there is nothing left to compare, so the check
+is retired rather than kept for reassurance).
+
+**2. A gate and the thing it gates must not share a trust domain.** Ordering is not a
+control when the credential does not depend on it. Found by D054: both publish
+workflows ran the full test suite, two build scripts and `npm ci` *before* the publish
+step, inside a job that already held `id-token: write` — and one of them documented
+that ordering as a safeguard. It was not one. The OIDC request variables are present
+for the job's whole duration, so any dependency executing an install script could have
+minted a publishing token at step one, and the gate would still have passed afterwards.
+The fix is structural, exactly as it is for rule 1: put the work and the credential in
+different jobs, so the job that can publish runs nothing that could want to.
+
+Stated generally: **a safeguard placed inside the blast radius of what it guards is not
+a safeguard.** Rule 1 is that statement about *information* — an oracle downstream of
+the defect cannot see it. Rule 2 is the same statement about *authority* — a check
+inside the credential's scope cannot constrain it. When adding either kind of
+protection, name what it is outside of.
+
+---
+
 ## D001 — Pin XGBoost 3.3.0 as the reference version, and track drift separately
 
 *2026-08-01*
@@ -1304,3 +1340,120 @@ Python package contains no `eval`, `exec`, `pickle`, `subprocess`, `open`, or ne
 and executes nothing at import time. No secret, token or key anywhere in the tree or in any of
 464 objects across all five refs. `CLAUDE.local.md` and `PLAN.md` are absent from history, from
 all tracked content, from `.gitignore`, and from all three built distributions.
+
+## D055 — A feature value infinite *in float32* is refused, the same as an explicit infinity
+
+*2026-08-06* — **narrows D022's refusal to cover the case it missed**
+
+`walk_margin` and the JavaScript row reader now narrow each feature value to float32 and
+refuse an infinite **result**. Previously both tested the float64 for `±inf`, so a finite
+float64 that becomes infinite through this library's own required narrowing went through.
+
+### The inconsistency
+
+`1e39` is a legal float64. `f32(1e39)` is `+inf`. The walk then compared `inf` against
+thresholds, routed consistently, and returned a number — while an explicitly infinite input
+raised. **Same mathematical value by the time any comparison happens, two behaviours, and no
+error either way.** Both predictors agreed on those rows, so it was never a cross-language
+defect; it was a hole in the refusal, which is a worse thing for this library to have.
+
+The evidence that it was unintentional rather than chosen: numpy emitted
+`RuntimeWarning: overflow encountered in cast` **1,160 times** in a 100,000-row parity run, on
+exactly the rows being accepted. A deliberate behaviour does not warn about itself. Nothing in
+`FORMAT.md`, `COMPAT.md` or D022 mentioned the case, in either direction.
+
+### Why refuse rather than accept
+
+Value ordering rank 1, loud failure over silent wrongness. This library compares in float32;
+that is not an implementation detail but the central invariant. A value that cannot be
+represented as a finite float32 has no defined position relative to any threshold, and routing
+it as `+inf` is a decision no measurement supports — XGBoost is *itself* inconsistent about
+infinite features (raising through `DMatrix`, comparing ordinarily through `inplace_predict`),
+which is exactly why D022 refused them in the first place. That reasoning covers `1e39`
+identically; the original rule simply did not reach it.
+
+Narrowing the set of accepted inputs toward loud failure is not gate-weakening. Nothing that
+previously produced a *number* now produces a different number: it produces a raise.
+
+### Implementation, and the two things that had to be got right
+
+`np.isinf(np.float32(value))`, not `not np.isfinite(...)` — `NaN` narrows to `NaN` and must stay
+**accepted**, because it is the missing value and routes by the tree's default direction. In
+JavaScript, `Math.fround(value) === Infinity || === -Infinity`, for the same reason.
+
+And narrow-then-test rather than a magnitude bound: `abs(value) > f32_max` would reject
+`3.4028234663852886e38`, the largest finite float32, which is an ordinary input. Both
+directions are pinned — six values refused, three accepted, per language.
+
+The `np.errstate(over="ignore")` around the check is deliberate: the cast warns on exactly the
+inputs now being refused, and emitting a numpy warning *and* raising is two reports of one
+problem when only the raise is actionable. Pinned by a test asserting no `RuntimeWarning`
+escapes. The 100,000-row run now reports **`python-side warnings none`**, where it previously
+reported 1,160.
+
+### What it cost, measured
+
+Nothing in the corpus. Checked explicitly rather than assumed: **0 of 299 fixture rows** carry a
+value that is finite as float64 and infinite as float32, so no recorded ground truth is
+invalidated and no fixture needed regenerating. Corpus parity stays `0.0` with the same 10 rows
+refused by both sides; the 100,000-row run stays `0.0` with refusal agreement intact, the newly
+refused rows now counting as refusals rather than as matching values.
+
+Suites: Python 982 → 992, Node 114 → 124.
+
+Decided before rc deliberately. Refusal semantics are the published contract, and narrowing them
+after a release is a breaking change.
+
+## D056 — The npm package ships sourcemaps, and that is a choice rather than a default
+
+*2026-08-06*
+
+`sourcemap: true` stays in `tsup.config.ts`. The security audit surfaced it as an undecided
+default: `dist/*.map` carries all four TypeScript sources verbatim in `sourcesContent`, 180 kB of
+the 293 kB published, and nothing recorded whether that was intended.
+
+### What was measured
+
+| | with maps | without |
+|---|---|---|
+| Tarball, compressed | **79.8 kB** | 31.2 kB |
+| Unpacked | 292.9 kB | 113.4 kB |
+| Files | 9 | 7 |
+
+So the cost is 48.6 kB compressed, 179.5 kB on disk.
+
+### Two facts that decide it
+
+**The bundle is not minified.** `tsup.config.ts` sets no `minify`, so `dist/index.js` ships as
+readable JavaScript with every identifier intact — it is the TypeScript with types stripped and
+modules concatenated. "Source visible to anyone who fetches the package" is therefore already
+true without the maps, and the repository is public MIT besides. Source *visibility* is not a
+consequence of this decision; only size is.
+
+**esbuild strips the comments.** 73 comment lines survive in `dist/index.js`; the load-bearing
+rationale does not — the note explaining that the threshold-side `Math.fround` is idempotent
+given the `Float32Array` (D045) is in the source and absent from the bundle. `sourcesContent` is
+the only place a consumer can read it.
+
+That is decisive *for this library specifically*. Its users' characteristic problem is a last-bit
+disagreement with XGBoost, and the comments are where the measurements that explain such a
+disagreement live — the platform-`logf` story of D053, the bundled-transform story of D032, the
+equality-routes-right rule. A package whose value proposition is "we can tell you why the number
+is what it is" should ship the reasoning next to the code.
+
+The size objection is also weaker than it looks: a `.map` is fetched only when devtools are open
+(`sourceMappingURL`, confirmed present in both bundles), and bundlers do not emit `.map` into
+production output. The 48.6 kB is install-size for a zero-dependency package, not runtime payload
+for an end user.
+
+### What changes
+
+Only that it is now decided and enforced. `tools/clean_install_js.sh` previously printed "no
+source or test files in the tarball" while the source shipped inside the maps — true of `src/`
+*paths* only. The message now says what it checks, and the check additionally asserts the maps
+are present, carry `sourcesContent`, and contain no absolute path — so the properties that make
+this decision safe are pinned rather than re-verified by hand each release.
+
+Revisit if the bundle ever becomes minified, which would make the maps load-bearing for
+debuggability rather than merely useful, or if `sourcesContent` ever starts carrying something
+other than the four source files.
