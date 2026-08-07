@@ -130,10 +130,4 @@ for the complete, current list and the evidence behind each refusal.
 
 Every exception carries structured attributes — `field`, `value`, `expected`, `index` — and the message embeds the offending value verbatim so the failure is legible. If your artifact or prediction input can be influenced by someone else, **do not pass the message straight into an HTTP response body or an HTML template**: escape it, or branch on the structured attributes and compose your own. Ordinary library behaviour, noted because the attributes exist precisely so you never have to display the string.
 
-## How this was built
-
-**This library was written by an AI system — Claude — working under human direction.** The human owner set the goals and constraints, made the scope decisions, and reviewed the work; the design, code, probes, tests and documentation were produced by the model.
-
-It is stated plainly because a numerical library asks for a particular kind of trust. The evidence is in the repository rather than asserted here: eleven committed probe reports recording real command output, four prior beliefs falsified by those probes and recorded with what replaced them, a numerical core validated per language against a high-precision reference rather than against the other language, and the model's own mistakes left visible in the commit history.
-
-Full disclosure and the supporting links are in the [repository README](https://github.com/anirudhmazumder/xgboost-bridge#how-this-was-built).
+**AI Disclosure:** Claude Code was used to help implement this project.

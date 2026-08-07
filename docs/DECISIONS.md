@@ -166,11 +166,14 @@ The test suite imports the built bundle. `tsc --noEmit` runs as a step separate 
 
 ## D012 — AI-authorship disclosure is deferred to the 1.0 announcement
 
-*2026-08-01*
+*2026-08-01* — **discharged 2026-08-06; see D059**
 
 This project is AI-authored under human direction. The disclosure lands with the 1.0 announcement rather than in the README now.
 
 **Why:** Recorded here so the commitment exists and is dated, independent of when the announcement copy is written.
+
+> **Discharged.** The disclosure is now in all three READMEs, as one line, ahead of the
+> announcement rather than with it. D059 records the wording and why it is short.
 
 ---
 
@@ -1509,3 +1512,45 @@ This also makes a future bump auditable rather than trusted: the suite goes red 
 is regenerated, so a version cannot ship with fixtures claiming the previous one.
 
 Suites: Python 992 → 994, Node 124.
+
+## D059 — The AI-authorship disclosure is one line, identical in all three READMEs
+
+*2026-08-06* — **discharges D012**
+
+```
+**AI Disclosure:** Claude Code was used to help implement this project.
+```
+
+Last line of `README.md`, `packages/python/README.md` and `packages/js/README.md`. Byte-identical
+in all three — verified by hash, not by eye.
+
+### Why identical matters more than the wording
+
+The two package READMEs are **frozen into the wheel and the npm tarball at publish time** and
+render on the PyPI and npm project pages permanently for that version. A wording difference
+between them is not correctable after release; it can only be superseded by a new version. So
+sameness is the property under test, and it is checked by a test rather than by review.
+
+### Why one line rather than the section it replaces
+
+Both package READMEs previously carried a three-paragraph section, and both ended by linking to
+`README.md#how-this-was-built` for "full disclosure and the supporting links". That anchor was
+removed when the root section was, so **two published-facing documents were pointing at a heading
+that no longer existed** — the reason this entry checks for dangling references rather than
+assuming there were none.
+
+The longer version was also redundant with the repository itself. `CLAUDE.md` is at the root, the
+agent definitions are tracked under `.claude/agents/`, and every commit carries a
+`Co-Authored-By` trailer. Anyone who wants the fuller record has it without a README paragraph
+summarising it, and a summary that drifts from what it summarises is worse than a pointer.
+
+### What was cleaned up alongside
+
+The root README kept an orphaned sentence after its section was removed — *"The same standard was
+applied to its authorship: where the model could not establish something, the repository says
+so"* — referring to a section that was no longer there. Removed.
+
+All links in all three READMEs re-checked: **0 broken**, counting relative paths, absolute
+`blob/main/` URLs against the working tree, and in-document anchors against their own headings.
+The four remaining external links are the PyPI and npm project pages, which 404 until first
+publish and are expected to.

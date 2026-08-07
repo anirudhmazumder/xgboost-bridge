@@ -1108,3 +1108,68 @@ def test_export_succeeds_at_a_base_score_where_a_recipe_would_miss(
         f"{objective} at base_score={base_score!r}: {mismatches}/{len(x)} rows "
         f"differ from XGBoost; first {first!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The AI-authorship disclosure is identical in all three READMEs (D059)
+#
+# The two package READMEs are frozen into the wheel and the npm tarball at
+# publish time and render on the PyPI and npm project pages permanently for that
+# version. A wording difference between them cannot be corrected after release,
+# only superseded by a new version -- so sameness is the property worth pinning,
+# and eye-checking three files is exactly the review step that lets one drift.
+#
+# Pinned as an exact string rather than a regex: this is published text, and
+# "close enough" is not a property a permanent artifact can have.
+# ---------------------------------------------------------------------------
+
+DISCLOSURE = "**AI Disclosure:** Claude Code was used to help implement this project."
+
+DISCLOSURE_READMES = (
+    "README.md",
+    "packages/python/README.md",
+    "packages/js/README.md",
+)
+
+
+@pytest.mark.parametrize("relative", DISCLOSURE_READMES)
+def test_every_readme_ends_with_the_disclosure(relative: str) -> None:
+    lines = (REPO_ROOT / relative).read_text(encoding="utf-8").rstrip("\n").split("\n")
+    assert lines[-1] == DISCLOSURE, (
+        f"{relative} does not end with the disclosure line.\n"
+        f"  last line: {lines[-1]!r}\n"
+        f"  expected : {DISCLOSURE!r}"
+    )
+
+
+def test_the_disclosure_is_byte_identical_across_the_three_readmes() -> None:
+    """One assertion for the property that actually matters.
+
+    The per-file test above would still pass if two of them matched each other
+    and the third matched a different constant, because each compares against the
+    same literal in *this* file. This compares them against each other, so a
+    future edit that changes the literal and two of the three files still fails.
+    """
+    found = {
+        relative: (REPO_ROOT / relative).read_text(encoding="utf-8").rstrip("\n").split("\n")[-1]
+        for relative in DISCLOSURE_READMES
+    }
+    distinct = set(found.values())
+    assert len(distinct) == 1, (
+        "the disclosure differs between READMEs that are published separately and "
+        f"permanently:\n" + "\n".join(f"  {k}: {v!r}" for k, v in found.items())
+    )
+
+
+@pytest.mark.parametrize("relative", DISCLOSURE_READMES)
+def test_no_readme_still_carries_the_superseded_section(relative: str) -> None:
+    """The long section D059 replaced, and the anchor two of them pointed at.
+
+    Both package READMEs previously ended by linking to
+    `README.md#how-this-was-built`; that heading was removed from the root README
+    before they were, so two published-facing documents pointed at a heading that
+    did not exist. This fails if either the section or the link comes back.
+    """
+    text = (REPO_ROOT / relative).read_text(encoding="utf-8")
+    assert "## How this was built" not in text, f"{relative} carries the superseded section"
+    assert "how-this-was-built" not in text, f"{relative} links to a removed anchor"

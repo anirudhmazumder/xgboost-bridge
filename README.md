@@ -187,4 +187,4 @@ refusals, that is this library working as intended.
   evidence behind each one, and which superseded which.
 Every decision that asserts runtime behaviour is mapped to a test that fails when the behaviour is reverted; the map is [`docs/DECISION_COVERAGE.md`](docs/DECISION_COVERAGE.md).
 
-The project's premise is that a plausible wrong number is worse than a crash. The same standard was applied to its authorship: where the model could not establish something, the repository says so.
+**AI Disclosure:** Claude Code was used to help implement this project.
