@@ -290,9 +290,19 @@ jobs:
 
           # 2. Host assertion. This is what distinguishes "installed from TestPyPI"
           #    from "installed from somewhere that happened to have it".
+          # Measured: TestPyPI serves files from `test-files.pythonhosted.org`, not
+          # from `test.pypi.org`. An earlier form of this check accepted any
+          # `*.pythonhosted.org` host, which passed for that reason and would ALSO
+          # have accepted `files.pythonhosted.org` -- production PyPI's CDN. A host
+          # assertion whose purpose is "this came from TestPyPI" must not accept the
+          # index it exists to distinguish TestPyPI from.
           host = urlparse(wheel["url"]).netloc
-          if not (host == "test.pypi.org" or host.endswith(".pythonhosted.org")):
-              sys.exit(f"FAIL: wheel is not hosted by TestPyPI: {wheel['url']}")
+          allowed = {"test.pypi.org", "test-files.pythonhosted.org"}
+          if host not in allowed:
+              sys.exit(
+                  f"FAIL: wheel is not hosted by TestPyPI.\n"
+                  f"  host    {host}\n  allowed {sorted(allowed)}\n  url     {wheel['url']}"
+              )
           print(f"host      : {host}  ({wheel['filename']})")
 
           # 3. Digest match on the bytes actually fetched.
