@@ -180,8 +180,13 @@ REVERTS: tuple[Revert, ...] = (
         protects="refusing a DAG in the JavaScript reader",
         decision="D058",
         file="packages/js/src/artifact.ts",
-        old="      if ((parents[child] as number) < 2) {",
-        new="      if (true) {",
+        # The `throw`'s own guard. The first draft of this entry targeted the
+        # saturating-increment guard just above it (`< 2`), which left the throw
+        # intact -- so the harness reported "not pinned" for a protection that was
+        # working. A mis-specified revert and a decayed protection look identical
+        # from the outside, which is why the failure message names both.
+        old="        if ((parents[child] as number) > 1) {",
+        new="        if (false) {",
         node_test="npm --prefix packages/js test",
         expect_failing=("not ok", "failing"),
         note=(
