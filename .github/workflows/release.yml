@@ -231,9 +231,18 @@ jobs:
       # `npm publish` of 1.0.0-rc.1 with no tag publishes to `latest` and
       # `npm i xgboost-predictor` would install a release candidate. npm 11
       # throws instead -- loud on the npm we now use, silent on the one we did.
-      # `publishConfig.tag` in package.json says the same thing, so the behaviour
-      # does not depend on this flag being remembered. PyPI needs no equivalent:
-      # `1.0.0rc1` is a PEP 440 prerelease and pip declines it by default.
+      # `publishConfig.tag` does NOT cover for it, which I checked rather than
+      # assumed and had previously claimed the opposite of. Probed on npm 12.0.1
+      # with a throwaway manifest: `publishConfig.registry` IS applied -- a
+      # sentinel registry shows up in the publish target -- while
+      # `publishConfig.tag: "rc"` still reports `with tag latest`. So the manifest
+      # field is not a second line of defence here, and **this flag is the only
+      # thing keeping a release candidate off the `latest` dist-tag.** A future
+      # edit removing it as redundant would publish an RC as `latest`, which is
+      # what `npm i xgboost-predictor` resolves to. Pinned by a test.
+      #
+      # PyPI needs no equivalent: `1.0.0rc1` is a PEP 440 prerelease and pip
+      # declines to select it by default.
       # Asserted rather than assumed. Node 24 bundles npm 11.x today; if a runner
       # image ever regresses that, this fails with the actual versions instead of
       # letting the registry return a token-shaped error, which is the confusing

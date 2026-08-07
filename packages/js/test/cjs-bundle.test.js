@@ -130,3 +130,51 @@ test("the CommonJS bundle carries no import or require of its own", () => {
   const imports = [...source.matchAll(/\bfrom\s*["']([^"']+)["']/g)].map((m) => m[1]);
   assert.deepEqual(imports, [], `dist/index.cjs imports: ${imports.join(", ")}`);
 });
+
+// ---------------------------------------------------------------------------
+// `--tag rc` in release.yml is load-bearing (D061)
+//
+// Measured on npm 12.0.1 with a throwaway manifest: `publishConfig.registry` is
+// applied — a sentinel registry appears in the publish target — while
+// `publishConfig.tag: "rc"` is not: `npm publish` still reports `with tag latest`.
+// An earlier comment in this repository claimed the manifest field made the flag
+// redundant. It does not.
+//
+// So the flag is the only thing keeping a release candidate off the `latest`
+// dist-tag, which is what `npm i xgboost-predictor` resolves to. Removing it as
+// redundant is a plausible future cleanup with a user-visible, hard-to-reverse
+// consequence, so it is pinned here rather than left to a comment.
+// ---------------------------------------------------------------------------
+
+test("release.yml publishes the RC under a non-default dist-tag", () => {
+  const workflow = readFileSync(
+    new URL("../../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const publishLines = workflow
+    .split("\n")
+    .filter((line) => line.includes("npm publish") && !line.trim().startsWith("#"));
+
+  assert.equal(publishLines.length, 1, `expected one npm publish line, got ${publishLines.length}`);
+  assert.match(
+    publishLines[0],
+    /--tag\s+rc\b/,
+    "npm publish must carry --tag rc; publishConfig.tag does not cover for it",
+  );
+  assert.match(publishLines[0], /--provenance\b/, "the release publish must request provenance");
+});
+
+test("the manifest declares a prerelease version while the rc tag is in force", () => {
+  const manifest = JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  );
+  // If the version ever stops being a prerelease, `--tag rc` becomes wrong rather
+  // than protective, and this says so instead of silently publishing 1.0.0 to rc.
+  const isPrerelease = /-(?:rc|alpha|beta)\./.test(manifest.version);
+  assert.equal(
+    isPrerelease,
+    true,
+    `version ${manifest.version} is not a prerelease, so --tag rc in release.yml ` +
+      `would hide a final release behind a non-default tag`,
+  );
+});
