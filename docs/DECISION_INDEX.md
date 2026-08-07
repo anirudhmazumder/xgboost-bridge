@@ -47,7 +47,7 @@ direction, decisions to their pinning tests.
 | Symbol | Kind | Line | Decisions |
 |---|---|---:|---|
 | *(whole file)* | module |  | [D006](DECISIONS.md#d006) [D028](DECISIONS.md#d028) [D045](DECISIONS.md#d045) |
-| `Predictor` | class | 90 | [D005](DECISIONS.md#d005) [D028](DECISIONS.md#d028) [D051](DECISIONS.md#d051) [D054](DECISIONS.md#d054) [D058](DECISIONS.md#d058) |
+| `Predictor` | class | 90 | [D005](DECISIONS.md#d005) [D028](DECISIONS.md#d028) [D051](DECISIONS.md#d051) [D054](DECISIONS.md#d054) [D058](DECISIONS.md#d058) [D064](DECISIONS.md#d064) |
 | `constructor` | method | 148 | [D005](DECISIONS.md#d005) [D021](DECISIONS.md#d021) [D022](DECISIONS.md#d022) [D045](DECISIONS.md#d045) [D055](DECISIONS.md#d055) [D058](DECISIONS.md#d058) |
 | `margin` | method | 261 | [D030](DECISIONS.md#d030) [D032](DECISIONS.md#d032) |
 | `walk` | method | 285 | [D004](DECISIONS.md#d004) [D045](DECISIONS.md#d045) [D053](DECISIONS.md#d053) |
@@ -131,7 +131,7 @@ direction, decisions to their pinning tests.
 | `_read_intercept` | function | 357 | [D015](DECISIONS.md#d015) |
 | `_read_node_values` | function | 408 | [D058](DECISIONS.md#d058) |
 | `_check_reachable_subgraph_is_a_tree` | function | 526 | [D058](DECISIONS.md#d058) |
-| `Predictor` | class | 688 | [D005](DECISIONS.md#d005) [D006](DECISIONS.md#d006) [D022](DECISIONS.md#d022) [D028](DECISIONS.md#d028) [D030](DECISIONS.md#d030) [D032](DECISIONS.md#d032) [D045](DECISIONS.md#d045) [D051](DECISIONS.md#d051) [D054](DECISIONS.md#d054) [D058](DECISIONS.md#d058) |
+| `Predictor` | class | 688 | [D005](DECISIONS.md#d005) [D006](DECISIONS.md#d006) [D022](DECISIONS.md#d022) [D028](DECISIONS.md#d028) [D030](DECISIONS.md#d030) [D032](DECISIONS.md#d032) [D045](DECISIONS.md#d045) [D051](DECISIONS.md#d051) [D054](DECISIONS.md#d054) [D058](DECISIONS.md#d058) [D064](DECISIONS.md#d064) |
 | `Predictor.from_json` | method | 740 | [D047](DECISIONS.md#d047) |
 | `Predictor.objective` | method | 779 | [D028](DECISIONS.md#d028) [D047](DECISIONS.md#d047) [D049](DECISIONS.md#d049) [D050](DECISIONS.md#d050) [D058](DECISIONS.md#d058) [D060](DECISIONS.md#d060) |
 | `Predictor.output_transform` | method | 790 | [D028](DECISIONS.md#d028) |
@@ -157,7 +157,7 @@ direction, decisions to their pinning tests.
 | *(whole file)* | module |  | [D058](DECISIONS.md#d058) |
 | `_validate_child_links` | function | 273 | [D058](DECISIONS.md#d058) |
 | `extract_trees` | function | 496 | [D058](DECISIONS.md#d058) |
-| `walk_margin` | function | 531 | [D004](DECISIONS.md#d004) [D022](DECISIONS.md#d022) [D045](DECISIONS.md#d045) [D047](DECISIONS.md#d047) [D053](DECISIONS.md#d053) [D055](DECISIONS.md#d055) [D058](DECISIONS.md#d058) |
+| `walk_margin` | function | 531 | [D004](DECISIONS.md#d004) [D022](DECISIONS.md#d022) [D045](DECISIONS.md#d045) [D047](DECISIONS.md#d047) [D053](DECISIONS.md#d053) [D055](DECISIONS.md#d055) [D058](DECISIONS.md#d058) [D064](DECISIONS.md#d064) |
 
 ## `packages/python/src/xgboost_bridge/validate.py`
 
@@ -215,7 +215,8 @@ direction, decisions to their pinning tests.
 | [D057](DECISIONS.md#d057) | Versions bumped to `1.0.0rc1` / `1.0.0-rc.1`, and the Python pair is now one literal |
 | [D058](DECISIONS.md#d058) | Seventeen findings from two adversarial sweeps: the recurring class, worked |
 | [D060](DECISIONS.md#d060) | The three sharpest open items, closed; npm moves to Trusted Publishing |
+| [D064](DECISIONS.md#d064) | The fixture door, the decision index, and a revert harness that found two gaps |
 
 ---
 
-85 symbols across 13 files, citing 42 of 63 entries. An entry absent here is one that governs the project rather than a named symbol — release mechanics, format design, scope. Those are not skippable; they are simply not reachable from a cursor position.
+85 symbols across 13 files, citing 43 of 64 entries. An entry absent here is one that governs the project rather than a named symbol — release mechanics, format design, scope. Those are not skippable; they are simply not reachable from a cursor position.

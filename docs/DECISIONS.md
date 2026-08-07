@@ -2069,3 +2069,103 @@ knowledge was in these entries and in one head; the next release may be far enou
 neither is available.
 
 Suites: Python 1058, Node 160 → **174**.
+
+## D064 — The fixture door, the decision index, and a revert harness that found two gaps
+
+*2026-08-07* — **narrows a claim I made in the cold-pickup read; adds a limit to D004 that was previously unstated**
+
+Three tools for a maintainer arriving without context, and two findings produced by
+building them. The findings are the substance; the tools are how they surfaced.
+
+### The fixture door was narrower than I described, and still open
+
+I had written that "every guard assumes the fixture is ground truth", implying the
+provenance was the weakness. That was wrong and worth correcting precisely, because
+the real gap was somewhere else. `fixtures/generate/corpus.py` takes
+`expected_margin` from `booster.predict()` and never from `walk_margin`, and it
+already re-walked every row and refused to write a fixture it could not reproduce
+bit-exactly, with the message *"this is a defect to report, not to fix"*.
+
+So the ground truth was never the problem. **The problem was that the check could
+not see anything.** Measured rather than argued: the sample-side `np.float32` cast
+in `walk_margin` was reverted and the corpus regenerated, and **generation
+succeeded.** Every corpus value is already exact in float32, so narrowing it is a
+no-op and an implementation that skips it routes every corpus row correctly.
+
+This is the project's recurring defect class — a check whose reach is narrower than
+it reads — found in the one place that would have laundered any future instance of
+it.
+
+The generator now also asks XGBoost about rows that **narrow onto** a threshold
+without equalling it: 1322 of them, built from each tree's own split values. Under
+the same revert, generation fails on the first fixture. XGBoost is the oracle, so
+this is not the exporter checking itself. `fixtures/tests/test_fixture_door.py`
+pins the probe, whose own failure mode is vacuity rather than error.
+
+Writing that test surfaced a **NEP 50** subtlety that now appears in three places
+because it changes what a test proves. A *Python* float is weakly typed:
+`python_float < np.float32(t)` is evaluated in **float32**, so an implementation
+missing the sample-side cast is accidentally correct for that caller. A `np.float64`
+is strongly typed and promotes to float64, exposing it. The same input, spelled two
+ways, hides or reveals the highest-value defect in the codebase — so the probe rows
+are `np.float64` deliberately, and `walk_margin` says so at the comparison site.
+
+### `docs/DECISION_INDEX.md`
+
+63 entries in chronological order do not answer "I am about to edit `walk_margin`,
+what governs it?". The index is keyed by file and symbol and **generated** by
+joining two directions, neither hand-kept: identifiers the entries mention, and
+`D0nn` references the source already carries, attributed by enclosing line range.
+
+The mention direction alone found 21 of 63 entries and missed **D004** and **D053**
+on `walk_margin` — the oldest entries state a rule without naming the function that
+implements it, because the function did not exist yet. Both directions: 85 symbols,
+42 entries. Where the code failed to cite a decision that governs it, **the code was
+fixed rather than the matcher loosened**; a looser matcher buys coverage with
+plausible wrong pointers, which is the wrong trade in this repository.
+
+### `tools/revert_harness.py`, and the two things it found
+
+The central discipline of this project — verify a protection by reverting it in
+isolation — was a practice: done once, by hand, when the protection was added.
+A practice cannot report that it has stopped working. **A revert that turns nothing
+red is now a finding, not a pass**, and the harness fails when the suite succeeds.
+
+It found two gaps on its first run, and they were different in kind:
+
+**The threshold-side cast in `walk_margin` was genuinely unpinned.** Every tree the
+`Predictor` builds is narrowed at parse time, so inside the walk the threshold is
+already float32 and the cast is a no-op on the only path 1073 tests exercised. It is
+load-bearing for a caller passing an un-narrowed tree, which the public signature
+permits — measured: with the cast the row routes RIGHT, without it LEFT. Narrowing a
+threshold can only move the split boundary when it rounds **down**, and the
+discriminating sample is then one that equals the narrowed threshold exactly, where
+"equality routes RIGHT" applies. Now pinned by its own test.
+
+**The accumulator's float32 discipline cannot be pinned site-by-site at all.** Three
+narrowings hold it — the float32 seed, the per-leaf cast, the outer cast — and each
+single-site revert stays green because any one of the three is sufficient alone. The
+outer cast re-narrows an un-narrowed seed; the seed plus the leaf cast make the outer
+cast a no-op. This is the absorption `CLAUDE.md` warns about, reached from the other
+direction, and it is **a limit rather than an oversight**: a future edit could remove
+exactly one of the three and nothing here would notice.
+
+Recorded rather than resolved. `CLAUDE.md` says to test each independently *or*
+collapse them to one, and collapsing would delete working protection from a public
+normative function to buy a tidier map — rule 1 (loud failure over silent wrongness)
+outranks that. So all three stay, the harness pins the minimal detectable
+*combination*, and the entry carries an `absorbs` field naming precisely what is not
+pinned. An honest gap in the record beats a green tick that means less than it
+appears to.
+
+One process note, because it is the same lesson: the first draft of the JavaScript
+in-degree revert targeted the saturating-increment guard instead of the `throw`, left
+the protection intact, and reported "not pinned". A mis-specified revert and a decayed
+protection are indistinguishable from outside, so the harness's failure message now
+names that possibility explicitly and tells the reader to rule it out first.
+
+### Also
+
+`CONTRIBUTING.md` states the fixture rule in the strongest terms available, and the
+README now says CI runs on `workflow_dispatch` — a newcomer who pushes and sees
+nothing would otherwise reasonably conclude CI is broken.
