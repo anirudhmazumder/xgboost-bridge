@@ -1894,3 +1894,81 @@ therefore one RC ahead of PyPI from here on. Cosmetic, recorded so it is not mis
 Fixture proof for the bump, as for D057: 0 of 299 margin patterns, 0 of 299 output patterns, 0 of
 3258 node values moved; `exporter_version` changed in 23 of 23; content with that field removed
 byte-identical in all 23.
+
+## D062 — 1.0.0 released to both registries; the verification step failed, the release did not
+
+*2026-08-07*
+
+`xgboost-bridge` 1.0.0 on PyPI and `xgboost-predictor` 1.0.0 on npm, both through Trusted
+Publishing with attestations and **no stored credential in the repository**. `release.yml`
+executed with `targets=both` and the `release` environment's required reviewer.
+
+### What the run reported, and what actually happened
+
+The run is recorded as a failure. **Both packages published successfully.** `publish-python`
+succeeded; `publish-javascript`'s publish step succeeded — `+ xgboost-predictor@1.0.0`, provenance
+signed and logged to sigstore — and the step *after* it, my own dist-tag assertion, failed with:
+
+```
+FAIL: the rc tag never came to point at 1.0.0
+```
+
+The retry loop hardcoded `rc`, because every publish before this one was a release candidate. For
+a final release the tag used is `latest`, so `rc` stayed at `1.0.0-rc.2` and the loop exhausted
+six attempts waiting for something that was never going to happen. The assertion now waits on the
+tag the publish step actually used, passed through the environment so the two cannot disagree.
+
+**This is the same defect class as the seventeen findings before it** — a check whose reach did
+not match its claim — and it is worth recording that it landed in the verification layer at the
+one moment verification mattered most. A green publish and a red run is a confusing state to
+inherit, and the fix is the boring one: never hardcode the thing you are about to compute.
+
+It was also nearly a genuinely bad outcome. The instruction was to stop rather than re-dispatch if
+a failure could leave one registry published and the other not, and `success / failure` across two
+publish jobs is exactly what that looks like from the outside. Measuring the registries before
+acting is what distinguished "the release is complete and a check is broken" from "half of 1.0.0
+is out". Diagnose before remediating, especially when remediation is irreversible.
+
+### The hardcoded tag was caught twice, once cheaply and once expensively
+
+The publish step itself had `--tag rc` hardcoded, which would have put 1.0.0 on the `rc` tag and
+left `latest` on `1.0.0-rc.1` permanently. That was caught **before any dispatch**, by this
+repository's own test — *"the manifest declares a prerelease version while the rc tag is in
+force"* — which went red the moment the version stopped being a prerelease. That test existed
+precisely to fail here, and it did its job.
+
+The identical mistake in the assertion's retry loop was not covered by any test, and cost a
+confusing run. The lesson is not "write more tests" but a specific one: the *tag* was derived and
+the *check on the tag* was not, so the two halves of one decision were expressed differently.
+
+### Verified from outside, after publishing
+
+Neither registry's result is taken from the workflow's own output:
+
+| | measured |
+|---|---|
+| `uv pip install "xgboost-bridge==1.0.0"` into an empty venv | installs; `__version__` 1.0.0; **5/5 margins bit-exact** vs XGBoost ground truth |
+| `npm install xgboost-predictor` into an empty project | resolves **1.0.0**; **5/5 margins bit-exact** |
+| npm dist-tags | `latest -> 1.0.0`, `rc -> 1.0.0-rc.2` |
+| npm attestation on 1.0.0 | present |
+| PyPI files | wheel and sdist, both attested |
+
+`npm install` with no version resolving to 1.0.0 is the observation that matters: `latest` moved
+off the release candidates, which is what the non-prerelease branch of the assertion exists to
+require and what npm's first-publish behaviour (D061) made impossible until a final version
+existed.
+
+### The split-release hazard, mapped rather than discovered
+
+Before dispatching, the failure modes were enumerated: `publish-python` failing skips npm and
+ships nothing (safe); `publish-python` succeeding and npm failing spends 1.0.0 on PyPI only, and a
+re-dispatch would fail on the duplicate *before* reaching npm — so the obvious recovery,
+`targets=npm-only`, was blocked by the non-prerelease guard. An `allow_partial` input now exists
+for exactly that case, which means the recovery path was in place before it could be needed rather
+than being written immediately after a partial release.
+
+The fixture proof for the bump is the same as D057 and D061: 0 of 299 margin patterns, 0 of 299
+output patterns, 0 of 3258 node values moved; `exporter_version` changed in 23 of 23; content with
+that one field removed byte-identical in all 23.
+
+Suites at release: Python **1058**, Node **160**, corpus parity `0.0`, 100,000-row parity `0.0`.

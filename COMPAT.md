@@ -6,9 +6,16 @@ derived from the decisions recorded in `docs/DECISIONS.md`; where this file and
 `docs/DECISIONS.md` disagree, `docs/DECISIONS.md` is the source of truth and this file
 has a bug.
 
-The project is pre-1.0. Everything below is subject to change before a 1.0
-release, and anything not explicitly settled here is called out as such
-rather than guessed at.
+**1.0.0 is released** — `xgboost-bridge` 1.0.0 on PyPI and `xgboost-predictor`
+1.0.0 on npm, both published 2026-08-07 through Trusted Publishing with
+attestations and no stored credential.
+
+Everything below is now a commitment rather than an intention. The refusals in
+particular are the published contract: **narrowing what either package accepts
+is a breaking change** and requires a major version, which is why several
+refusals were tightened deliberately before 1.0.0 rather than after (D055,
+D058). Anything not explicitly settled here is still called out as such rather
+than guessed at.
 
 ## Strict feature keys
 

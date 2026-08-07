@@ -424,6 +424,7 @@ jobs:
           fi
 
           echo "publishing $TARBALL as $VERSION under dist-tag $TAG"
+          echo "PUBLISHED_TAG=$TAG" >> "$GITHUB_ENV"
           # No NODE_AUTH_TOKEN. npm exchanges the Actions OIDC token for a
           # short-lived credential, which is why `id-token: write` is declared on
           # this job and why the job runs nothing else.
@@ -454,15 +455,26 @@ jobs:
 
           # The registry is eventually consistent, so retry rather than fail on a
           # race that says nothing about the publish.
+          # Wait for THE TAG THAT WAS USED, not for `rc`. The first version of this
+          # loop hardcoded `rc`, because every publish until 1.0.0 was a release
+          # candidate -- so on the real release it waited six times for `rc` to
+          # become 1.0.0, which it never would (the publish used `latest`), and
+          # reported "the rc tag never came to point at 1.0.0" about a release that
+          # had already succeeded. The publish step was green and the verification
+          # step failed: a check whose reach did not match its claim, which is the
+          # class this whole pipeline has been closing.
+          # From the publish step via the environment, so the assertion cannot
+          # disagree with the flag that was actually passed.
+          EXPECTED_TAG="${PUBLISHED_TAG:?the publish step did not record its dist-tag}"
           TAGS="{}"
           for attempt in 1 2 3 4 5 6; do
             TAGS=$(npm view xgboost-predictor dist-tags --json 2>/dev/null || echo "{}")
-            if node -e 'process.exit(JSON.parse(process.argv[1]).rc === process.argv[2] ? 0 : 1)' \
-                 "$TAGS" "$VERSION"; then
+            if node -e 'process.exit(JSON.parse(process.argv[1])[process.argv[2]] === process.argv[3] ? 0 : 1)' \
+                 "$TAGS" "$EXPECTED_TAG" "$VERSION"; then
               break
             fi
             if [ "$attempt" = "6" ]; then
-              echo "FAIL: the rc tag never came to point at $VERSION"
+              echo "FAIL: the $EXPECTED_TAG tag never came to point at $VERSION"
               echo "  dist-tags: $TAGS"
               exit 1
             fi
@@ -476,8 +488,11 @@ jobs:
             const version = process.argv[2];
             const isPre = (v) => /-(?:rc|alpha|beta)\./.test(v || "");
 
-            if (tags.rc !== version) {
-              throw new Error("the rc tag is " + tags.rc + ", expected " + version);
+            const expectedTag = process.argv[3];
+            if (tags[expectedTag] !== version) {
+              throw new Error(
+                "the " + expectedTag + " tag is " + tags[expectedTag] + ", expected " + version,
+              );
             }
 
             if (isPre(version)) {
@@ -500,4 +515,4 @@ jobs:
               }
               console.log("latest -> " + tags.latest + ", rc -> " + tags.rc + ". Correct.");
             }
-          ' "$TAGS" "$VERSION"
+          ' "$TAGS" "$VERSION" "$EXPECTED_TAG"
