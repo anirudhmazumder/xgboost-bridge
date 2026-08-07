@@ -185,21 +185,6 @@ refusals, that is this library working as intended.
   and what a caller should expect from the bundled numeric transform.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — durable engineering decisions, the
   evidence behind each one, and which superseded which.
-
-## How this was built
-
-**This library was written by an AI system — Claude — working under human direction.** The human owner set the goals and the constraints, made the scope decisions, and reviewed the work; the design, the code, the empirical probes, the tests and the documentation were produced by the model.
-
-That is stated here rather than in a footnote, because a numerical library asks for a particular kind of trust and you should know what you are extending it to.
-
-What was done to earn it is in the repository rather than asserted here:
-
-- **Every empirical claim is measured, and the measurement is committed.** Eleven probe reports under [`probes/`](probes/), each recording the commands run and their real output. Where something could not be measured, it says so.
-- **Four confidently-held beliefs were falsified by those probes** and are recorded alongside what replaced them, rather than quietly corrected: the logistic intercept is not `logit(base_score)`; DART cannot be detected by two independent signals; the output transform runs in float32, not float64; `num_class` can legitimately be `"1"`.
-- **The numerical core is validated against an external high-precision reference, per language independently.** Cross-language agreement is measured separately and is never treated as evidence of correctness — two identical implementations agreeing proves only that the code was written twice.
-- **Defects found in shipped code by review and adversarial testing are recorded, not just fixed.** Among them: a refusal that two documents specified and no code performed; a `pip install` path that resolved a version the exporter then refused; four of five float32 sites in the tree walk pinned by no test at all.
-- **The model's own mistakes are in the commit history**, including a specification example computed at the wrong precision, a statistic propagated with the wrong denominator, and an edit reported as applied that had silently matched nothing.
-
 Every decision that asserts runtime behaviour is mapped to a test that fails when the behaviour is reverted; the map is [`docs/DECISION_COVERAGE.md`](docs/DECISION_COVERAGE.md).
 
 The project's premise is that a plausible wrong number is worse than a crash. The same standard was applied to its authorship: where the model could not establish something, the repository says so.
