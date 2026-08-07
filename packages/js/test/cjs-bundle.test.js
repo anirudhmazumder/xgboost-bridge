@@ -183,3 +183,36 @@ test("the manifest declares a prerelease version while the rc tag is in force", 
       `would hide a final release behind a non-default tag`,
   );
 });
+
+test("release.yml passes npm publish an unambiguous path, not a bare relative one", () => {
+  // `npm publish dist/x.tgz` does not publish a file: npm parses a bare `a/b`
+  // spec as the GitHub shorthand `github:a/b`. The first dispatch of release.yml
+  // failed on exactly this, with `git ls-remote ssh://git@github.com/dist/...` and
+  // "Permission denied (publickey)" -- an error about SSH keys from a step that
+  // touches no git. Reproduced locally: `dist/x.tgz` gives
+  // `Refusing to fetch "github:dist/x.tgz"`; `./dist/x.tgz` and an absolute path
+  // both resolve to the file.
+  const workflow = readFileSync(
+    new URL("../../../.github/workflows/release.yml", import.meta.url),
+    "utf8",
+  );
+  const publishLine = workflow
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.startsWith("npm publish"));
+  assert.ok(publishLine, "no npm publish invocation found");
+
+  // The argument must be a variable, and that variable must be built from an
+  // absolute path -- `$(cd dist && pwd)` -- rather than a bare `ls dist/*.tgz`.
+  assert.match(publishLine, /npm publish "\$[A-Z_]+"/, "the spec must be a quoted variable");
+  assert.match(
+    workflow,
+    /TARBALL="\$\(cd dist && pwd\)/,
+    "the tarball path must be absolute, or npm reads it as a github: spec",
+  );
+  assert.doesNotMatch(
+    workflow,
+    /TARBALL=\$\(ls dist\/\*\.tgz\)/,
+    "a bare relative glob is the form that failed",
+  );
+});
