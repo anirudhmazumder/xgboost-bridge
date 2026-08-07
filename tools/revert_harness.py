@@ -185,8 +185,8 @@ REVERTS: tuple[Revert, ...] = (
         # intact -- so the harness reported "not pinned" for a protection that was
         # working. A mis-specified revert and a decayed protection look identical
         # from the outside, which is why the failure message names both.
-        old="        if ((parents[child] as number) > 1) {",
-        new="        if (false) {",
+        old="      if ((parents[child] as number) > 1) {",
+        new="      if (false) {",
         node_test="npm --prefix packages/js test",
         expect_failing=("not ok", "failing"),
         note=(
