@@ -62,6 +62,10 @@ class Revert:
     pytest_args: tuple[str, ...] = ()
     node_test: str | None = None
     expect_failing: tuple[str, ...] = ()
+    # Single-site reverts measured GREEN because another site covers for them. A
+    # non-empty value here means this entry pins a *set*, and that no member of the
+    # set is independently pinned by anything.
+    absorbs: tuple[str, ...] = ()
     note: str = ""
 
 
@@ -120,20 +124,36 @@ REVERTS: tuple[Revert, ...] = (
         ),
     ),
     Revert(
-        name="accumulator-narrowing",
-        protects="narrowing the accumulator after every single addition",
+        # Named "-set" deliberately. This is the one entry here that does NOT pin a
+        # single site, and saying so in the name is better than a footnote nobody
+        # reads. See `absorbs` below.
+        name="accumulator-narrowing-set",
+        protects="keeping the accumulator in float32 across the whole walk",
         decision="D004",
         file="packages/python/src/xgboost_bridge/trees.py",
         old="accumulator = np.float32(accumulator + np.float32(node_values[node]))",
-        new="accumulator = accumulator + np.float32(node_values[node])",
+        new="accumulator = accumulator + node_values[node]",
         pytest_args=("packages/python/tests/test_walk_margin_narrowing_sites.py",),
         expect_failing=("test_the_accumulator_is_narrowed_after_every_addition",),
+        absorbs=(
+            "accumulator = intercept  (seed narrowing, line 585)",
+            "accumulator = np.float32(accumulator + np.float32(...))  (outer cast alone)",
+            "accumulator = accumulator + np.float32(node_values[node])  (leaf cast alone)",
+        ),
         note=(
-            "A float64 sum narrowed once at the end scored 318-2541/5000 "
-            "bit-exact. This is the deviation that looks most harmless. Also green "
-            "on the first run, for the same reason as the threshold side: "
-            "np.float32 + np.float32 stays float32 under NEP 50, so the explicit "
-            "cast does nothing once the tree has been narrowed."
+            "Three overlapping narrowings hold this invariant -- the float32 seed, "
+            "the per-leaf cast, and the outer cast -- and MEASURED, each single-site "
+            "revert stays green, because any one of the three is sufficient on its "
+            "own. The outer cast alone re-narrows an un-narrowed seed; the seed plus "
+            "the leaf cast keep both operands float32 so the outer cast becomes a "
+            "no-op. This is precisely the absorption CLAUDE.md warns about, arrived "
+            "at from the other direction. So this entry reverts the minimal "
+            "detectable COMBINATION and pins the set rather than any member. That is "
+            "a real limit, recorded rather than papered over: a future edit could "
+            "remove exactly one of the three and no test in this repository would "
+            "notice. Kept redundant anyway -- walk_margin is public and normative, "
+            "and defence in depth on a silent-wrong-number path outranks a tidy "
+            "one-to-one map between protections and tests."
         ),
     ),
     Revert(
@@ -246,6 +266,8 @@ def verify(revert: Revert) -> bool:
 
     if caught:
         print(f"  red, as required: {_first_failure(output)}")
+        for absorbed in revert.absorbs:
+            print(f"  but NOT independently pinned: {absorbed}")
         return True
 
     print(
@@ -279,9 +301,11 @@ def main() -> int:
 
     if arguments.list:
         for revert in REVERTS:
-            print(f"{revert.name:24} {revert.decision}  {revert.protects}")
+            print(f"{revert.name:26} {revert.decision}  {revert.protects}")
             if revert.note:
-                print(f"{'':24} {revert.note}")
+                print(f"{'':26} {revert.note}")
+            for absorbed in revert.absorbs:
+                print(f"{'':26} NOT independently pinned: {absorbed}")
         return 0
 
     dirty = _refuse_dirty(selected)

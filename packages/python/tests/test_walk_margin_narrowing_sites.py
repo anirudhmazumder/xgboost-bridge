@@ -81,7 +81,15 @@ def test_the_threshold_side_cast_changes_the_route_on_an_un_narrowed_tree():
 
 
 def test_the_accumulator_is_narrowed_after_every_addition_not_once_at_the_end():
-    """Pins the outer `np.float32(...)` around the accumulator update.
+    """Pins the accumulator's float32 discipline as a **set**, not one site.
+
+    Three narrowings hold this invariant -- the float32 seed on line 585, the
+    per-leaf cast, and the outer cast -- and measurement says any one of the three
+    is sufficient alone, so every single-site revert stays green. The outer cast
+    re-narrows an un-narrowed seed; the seed plus the leaf cast make the outer cast
+    a no-op. So this test pins the combination and is honest about what it does not
+    pin: a future edit could delete exactly one of the three and nothing here would
+    fail. Recorded in `tools/revert_harness.py` under `absorbs`.
 
     Ten leaves of `0.4` added to an intercept of `1e7`. At that magnitude a float32
     ULP is exactly `1.0`, so each `0.4` rounds away and a per-addition narrowing
