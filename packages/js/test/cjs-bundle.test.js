@@ -151,9 +151,14 @@ test("release.yml publishes the RC under a non-default dist-tag", () => {
     new URL("../../../.github/workflows/release.yml", import.meta.url),
     "utf8",
   );
+  // Lines that *invoke* npm publish, not lines that mention it. Prose mentions
+  // live in `#` comments and in a YAML block scalar (the `targets` input
+  // description), and an earlier version of this filter caught the latter --
+  // trimming and testing for a leading `#` does not exclude a block scalar.
   const publishLines = workflow
     .split("\n")
-    .filter((line) => line.includes("npm publish") && !line.trim().startsWith("#"));
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("npm publish"));
 
   assert.equal(publishLines.length, 1, `expected one npm publish line, got ${publishLines.length}`);
   assert.match(

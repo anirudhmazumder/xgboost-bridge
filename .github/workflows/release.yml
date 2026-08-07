@@ -41,6 +41,22 @@ on:
           itself states what is about to happen.
         required: true
         type: string
+      targets:
+        description: >-
+          Which registries to publish to. `both` is the release path. `npm-only`
+          exists because npm requires a package to exist before Trusted
+          Publishing can be configured, so the first npm publish is manual and
+          the workflow's npm path needs a rehearsal that does not also require a
+          PyPI Trusted Publisher. A non-prerelease version MUST use `both` --
+          asserted in `verify`, because half-publishing a real release is the
+          failure this input could otherwise cause.
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - npm-only
+          - pypi-only
 
 # Least privilege, stated rather than inherited. Once any scope is named,
 # every unnamed scope becomes `none` -- so a job declaring only
@@ -69,6 +85,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read # deliberately no id-token: this job must not be able to publish
+    outputs:
+      # Read once, here, from the installed package and the manifest -- so the
+      # publish jobs pin what was built rather than re-deriving it.
+      version: ${{ steps.built.outputs.version }}
+      npm_version: ${{ steps.built.outputs.npm_version }}
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -139,12 +160,36 @@ jobs:
       # form of this step did, and it would have failed the first ever run after
       # the whole gate had passed.
       - name: Show exactly what would be published
+        id: built
         run: |
           set -euo pipefail
           ls -l dist
+          VERSION=$(uv run python -c "import xgboost_bridge; print(xgboost_bridge.__version__)")
+          NPM_VERSION=$(node -p "require('./packages/js/package.json').version")
           echo "--- versions being spent, permanently ---"
-          echo "python: $(uv run python -c 'import xgboost_bridge; print(xgboost_bridge.__version__)')"
-          node -p "'npm:    ' + require('./packages/js/package.json').version"
+          echo "python: $VERSION"
+          echo "npm:    $NPM_VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "npm_version=$NPM_VERSION" >> "$GITHUB_OUTPUT"
+
+      # A prerelease may target one registry; a final release may not. Without
+      # this, `npm-only` on 1.0.0 would put the JavaScript package on npm with no
+      # Python counterpart and nothing would say so until someone noticed.
+      - name: A non-prerelease must publish to both registries
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.built.outputs.version }}"
+          NPM_VERSION="${{ steps.built.outputs.npm_version }}"
+          echo "python $VERSION, npm $NPM_VERSION, targets ${{ inputs.targets }}"
+          IS_PRERELEASE=$(node -e '
+            const v = process.argv[1];
+            process.stdout.write(/(a|b|rc|alpha|beta|dev)/i.test(v) ? "yes" : "no");
+          ' "$VERSION")
+          echo "prerelease: $IS_PRERELEASE"
+          if [ "$IS_PRERELEASE" = "no" ] && [ "${{ inputs.targets }}" != "both" ]; then
+            echo "FAIL: $VERSION is not a prerelease, so targets must be 'both'"
+            exit 1
+          fi
 
       - name: Hand the distributions to the publish jobs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -157,6 +202,7 @@ jobs:
   publish-python:
     name: Publish xgboost-bridge to PyPI
     needs: verify
+    if: inputs.targets != 'npm-only'
     runs-on: ubuntu-latest
     # No environment named "release" exists in this repository yet -- see the
     # file header. Until it is created with a required-reviewer rule, this name
@@ -191,6 +237,16 @@ jobs:
     # npm counterpart is a gap, whereas the reverse plus a failed retry leaves
     # the two registries disagreeing about what 1.0 is.
     needs: [verify, publish-python]
+    # `publish-python` being SKIPPED must not skip this job, which is what a bare
+    # `needs` would do. So the condition is explicit: verify must have succeeded,
+    # and the PyPI job must have either succeeded or been deliberately skipped --
+    # never failed.
+    if: >-
+      !cancelled()
+      && inputs.targets != 'pypi-only'
+      && needs.verify.result == 'success'
+      && (needs.publish-python.result == 'success'
+          || needs.publish-python.result == 'skipped')
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -289,3 +345,76 @@ jobs:
           # short-lived credential, which is why `id-token: write` is declared on
           # this job and why the job runs nothing else.
           npm publish "$TARBALL" --access public --provenance --tag rc
+
+      # ---------------------------------------------------------------------
+      # What the dist-tags actually point at, after the upload. Nothing verified
+      # this, and it is the check that matters most to a consumer: `npm i
+      # xgboost-predictor` resolves `latest`, so a prerelease sitting there is a
+      # silent wrong-version-installed path -- the same class as every other
+      # defect closed in this repository.
+      #
+      # Why it is needed at all: npm sets `latest` UNCONDITIONALLY on a package's
+      # first publish, regardless of `--tag`, and refuses to remove it afterwards
+      # (E400 -- `latest` is protected and every package must have one). Measured
+      # on this package: after a manual `npm publish --tag rc` of 1.0.0-rc.1, both
+      # `rc` AND `latest` pointed at 1.0.0-rc.1. `--tag rc` did work -- the `rc`
+      # tag exists -- it simply does not prevent the bootstrap assignment. So
+      # `latest` cannot be corrected until a non-prerelease version exists, and
+      # this step is what confirms the correction happened when it does (D061).
+      # ---------------------------------------------------------------------
+      - name: Assert the dist-tags point where they should
+        env:
+          VERSION: ${{ needs.verify.outputs.npm_version }}
+        run: |
+          set -euo pipefail
+          echo "published version: $VERSION"
+
+          # The registry is eventually consistent, so retry rather than fail on a
+          # race that says nothing about the publish.
+          TAGS="{}"
+          for attempt in 1 2 3 4 5 6; do
+            TAGS=$(npm view xgboost-predictor dist-tags --json 2>/dev/null || echo "{}")
+            if node -e 'process.exit(JSON.parse(process.argv[1]).rc === process.argv[2] ? 0 : 1)' \
+                 "$TAGS" "$VERSION"; then
+              break
+            fi
+            if [ "$attempt" = "6" ]; then
+              echo "FAIL: the rc tag never came to point at $VERSION"
+              echo "  dist-tags: $TAGS"
+              exit 1
+            fi
+            echo "not visible yet; waiting 10s"
+            sleep 10
+          done
+
+          echo "dist-tags: $TAGS"
+          node -e '
+            const tags = JSON.parse(process.argv[1]);
+            const version = process.argv[2];
+            const isPre = (v) => /-(?:rc|alpha|beta)\./.test(v || "");
+
+            if (tags.rc !== version) {
+              throw new Error("the rc tag is " + tags.rc + ", expected " + version);
+            }
+
+            if (isPre(version)) {
+              if (tags.latest === version) {
+                console.log("NOTE: latest also points at the prerelease " + version +
+                  ". That is npm first-publish behaviour and cannot be undone until a" +
+                  " non-prerelease version exists.");
+              } else if (isPre(tags.latest)) {
+                console.log("NOTE: latest points at another prerelease, " + tags.latest + ".");
+              } else {
+                console.log("latest points at " + tags.latest + ", a final release. Correct.");
+              }
+            } else {
+              if (tags.latest !== version) {
+                throw new Error("latest points at " + tags.latest + ", not the just-published " +
+                  version + "; npm i xgboost-predictor would install the wrong version");
+              }
+              if (isPre(tags.latest)) {
+                throw new Error("latest is the prerelease " + tags.latest + " after a final release");
+              }
+              console.log("latest -> " + tags.latest + ", rc -> " + tags.rc + ". Correct.");
+            }
+          ' "$TAGS" "$VERSION"

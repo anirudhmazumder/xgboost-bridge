@@ -1810,3 +1810,87 @@ allow-list-checked before that table is consulted, and the second is a coverage 
 regeneration path whose output is already verified byte-identical.
 
 Suites: Python 1056 → 1058, Node 148 → 157.
+
+## D061 — npm sets `latest` on a package's first publish, and it cannot be removed
+
+*2026-08-06* — **corrects a claim I made about `publishConfig.tag`; adds the post-publish dist-tag assertion**
+
+Two npm behaviours, both measured on this package rather than reasoned about, and both
+affecting what `npm install xgboost-predictor` resolves to.
+
+### `publishConfig.tag` is not honoured, so `--tag` is load-bearing
+
+I had said the manifest field made the `--tag rc` flag redundant. It does not. Probed on npm
+12.0.1 with a throwaway manifest: `publishConfig.registry` **is** applied — a sentinel registry
+appears in the publish target — while `publishConfig.tag: "rc"` still reports `with tag latest`.
+The merge mechanism works; `tag` specifically is not picked up by that code path.
+
+So the flag is the only thing keeping a release candidate off the default tag. Removing it as
+redundant is a plausible future cleanup with a user-visible effect, so `release.yml` must carry
+exactly one `npm publish` invocation and it must carry `--tag rc` — pinned by a test, along with
+the converse: if the version ever stops being a prerelease, `--tag rc` becomes wrong rather than
+protective and hides a final release behind a non-default tag.
+
+That test's first version matched any line *containing* `npm publish`, which caught a prose
+mention inside a YAML block scalar — trimming and testing for a leading `#` does not exclude a
+block scalar. It matches invocations now.
+
+### `latest` is assigned unconditionally on the first publish
+
+**`--tag rc` worked and was not sufficient.** After a manual `npm publish --tag rc` of
+`1.0.0-rc.1`, measured:
+
+```
+rc     -> 1.0.0-rc.1
+latest -> 1.0.0-rc.1
+```
+
+npm sets `latest` on a package's first publish regardless of `--tag`, and then refuses to remove
+it: `npm dist-tag rm` returns **E400**, because `latest` is protected and every package must have
+one. So it cannot be corrected until a non-prerelease version exists, and until then
+`npm i xgboost-predictor` installs a release candidate.
+
+**First publish is exactly when the protection is weakest**, which is worth stating plainly: the
+flag that governs the tag is honoured, the manifest field that would back it up is not, and the
+one assignment that cannot be undone happens before either has anything to constrain. Anyone
+bootstrapping a package by publishing a prerelease first — the normal way to create a package so
+that Trusted Publishing can be configured, since npm has no pending-publisher equivalent to
+PyPI's — hits this.
+
+Not a wrong number, and not silent either once looked at. But it *is* a wrong-version-installed
+path, and nothing verified the tags at all.
+
+### The assertion that was missing
+
+`release.yml` now checks, after every npm publish, what the dist-tags actually point at:
+
+- `rc` must point at the version just published, with retries for registry propagation.
+- For a **prerelease**, `latest` pointing at a prerelease is reported rather than failed — it is
+  npm's bootstrap behaviour and cannot be undone.
+- For a **final release**, `latest` **must** equal the just-published version and **must not** be
+  a prerelease. That is the assertion the step exists for: it is what confirms `1.0.0` displaced
+  the RC, and it fails loudly if an RC is still sitting there.
+
+### A target selector, because the npm path could not otherwise be rehearsed
+
+`publish-javascript` has `needs: [verify, publish-python]`, and `publish-python` targets real
+PyPI, which has no project and no Trusted Publisher. Dispatching `release.yml` would therefore
+fail at PyPI and **skip the npm job entirely** — the rehearsal would not happen. Caught before
+spending a dispatch.
+
+A `targets` input now selects `both` / `npm-only` / `pypi-only`. Two guards keep it from becoming
+a way to half-publish a release: `verify` fails if a **non-prerelease** version is dispatched with
+anything other than `both`, and `publish-javascript`'s condition requires `verify` to have
+succeeded and `publish-python` to have either succeeded or been *deliberately skipped* — never
+failed. A bare `needs` would have skipped the npm job whenever the PyPI job was skipped, which is
+the opposite of what is wanted.
+
+### Versions
+
+`1.0.0-rc.1` is spent on npm and carries **no attestation** — a manual publish cannot produce
+provenance, which requires CI with OIDC. `1.0.0-rc.2` is the rehearsal version, and npm is
+therefore one RC ahead of PyPI from here on. Cosmetic, recorded so it is not mistaken for drift.
+
+Fixture proof for the bump, as for D057: 0 of 299 margin patterns, 0 of 299 output patterns, 0 of
+3258 node values moved; `exporter_version` changed in 23 of 23; content with that field removed
+byte-identical in all 23.
