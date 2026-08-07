@@ -1,9 +1,9 @@
 name: Release rehearsal (TestPyPI)
 
 # A rehearsal of the real publish path, on an index where a mistake costs a
-# version number instead of a release. Publishing is irreversible on every
-# index that matters, and this workflow has never run, so the OIDC exchange,
-# the build, and the install are exercised here first.
+# version number instead of a release. Publishing is irreversible on every index
+# that matters, and this workflow has never run, so the OIDC exchange, the build,
+# and the install are exercised here first.
 #
 # What makes this a rehearsal rather than a smoke test: it does not stop at
 # "upload succeeded". It installs the published artifact from TestPyPI into an
@@ -11,12 +11,46 @@ name: Release rehearsal (TestPyPI)
 # XGBoost's own recorded ground truth. An upload that produces an unusable
 # package is the failure worth catching, and only the round trip catches it.
 #
-# It cannot fire accidentally:
+# ---------------------------------------------------------------------------
+# Why this is three jobs rather than one
+#
+# The earlier single-job version declared `id-token: write` and then ran `npm
+# ci`, `uv sync`, the test suite, and a build script -- all before the publish
+# step. That is the wrong shape, and its header comment ("the full gate runs
+# BEFORE anything is published") did not describe a control: the OIDC request
+# variables are present for the whole job from step one, so gate ordering
+# constrains nothing. Any dependency executing an install script during `npm ci`
+# could mint a publishing token and upload its own artifact, and the gate would
+# still pass afterwards.
+#
+# So the credential is scoped to a job that runs no third-party code: `publish`
+# downloads an artifact and calls the publisher, and does nothing else. `verify`
+# does all the work and cannot publish, because it has no `id-token` at all.
+# The publisher action itself is third-party code inside the credentialed job --
+# that is unavoidable, it is what does the uploading, and it is SHA-pinned.
+#
+# ---------------------------------------------------------------------------
+# What actually prevents an accidental or unauthorised publish
+#
+# Configured in this file, and true as written:
 #   1. `workflow_dispatch` is the only trigger. No push, tag, or release event.
-#   2. `environment: testpypi` carries a required reviewer.
-#   3. Publishing uses Trusted Publishing (OIDC) against test.pypi.org only.
+#   2. Publishing uses Trusted Publishing (OIDC) against test.pypi.org only.
 #      There is no PyPI credential anywhere in this file, and the
 #      repository-url below is TestPyPI's, not PyPI's.
+#   3. `id-token: write` exists in one job, whose only steps are a download and
+#      the publish.
+#
+# NOT guaranteed by this file, and it must be configured in repository settings
+# before the first dispatch:
+#   4. `environment: testpypi` below is a *reference*. GitHub creates an
+#      environment on first use with NO protection rules, so unless the
+#      environment already exists and carries a required reviewer, this job
+#      publishes immediately and unreviewed. A previous version of this comment
+#      asserted the reviewer as a fact; it was not one.
+#   5. The Trusted Publisher entry on TestPyPI must itself name the environment.
+#      An entry registered for (repository, workflow) with the environment field
+#      left blank will accept a token minted from any environment, or none, so
+#      the binding has to exist on both sides to mean anything.
 on:
   workflow_dispatch:
     inputs:
@@ -27,38 +61,35 @@ on:
         required: true
         type: string
 
-# Read-only by default. The publish job widens to id-token: write for OIDC,
-# and nothing else.
+# Read-only by default. Only the publish job widens, and only to id-token.
 permissions:
   contents: read
 
 jobs:
-  rehearse:
-    name: Publish to TestPyPI, then install from it and predict
+  # ---------------------------------------------------------------------------
+  # Everything that runs untrusted code, and nothing that can publish.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: Full gate, then build the distributions
     runs-on: ubuntu-latest
-    environment: testpypi
     permissions:
-      contents: read
-      id-token: write # required for Trusted Publishing; nothing else needs it
-
+      contents: read # deliberately no id-token: this job must not be able to publish
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # ---------------------------------------------------------------------
-      # The full gate runs BEFORE anything is published. A publish workflow
-      # that skips its own verification because "CI already passed" is trusting
-      # a different commit's result for this one -- and on an irreversible
-      # operation that is the wrong trade.
-      # ---------------------------------------------------------------------
       - name: Set up Node.js 20
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
 
+      # --ignore-scripts: the only dependency here with an install script is
+      # esbuild, whose binary comes from a locked, hashed platform package, so
+      # the script has nothing to do. Skipping it removes install-time code
+      # execution from a job that builds what gets published.
       - name: Install JavaScript dependencies
         working-directory: packages/js
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Type-check (separate from the build)
         working-directory: packages/js
@@ -88,14 +119,14 @@ jobs:
       - name: Cross-language parity, both measurement points
         run: uv run python parity/run_parity.py
 
+      - name: Cross-language parity at scale (~100,000 adversarial rows)
+        run: uv run python parity/run_parity_scale.py
+
       # Verifies the wheel's CONTENTS and that it works when installed, before
       # that same wheel is uploaded anywhere.
       - name: Verify the wheel installs and predicts
         run: ./tools/clean_install_python.sh
 
-      # ---------------------------------------------------------------------
-      # Build and publish.
-      # ---------------------------------------------------------------------
       - name: Build the distributions to publish
         run: uv build packages/python --out-dir dist
 
@@ -105,19 +136,62 @@ jobs:
           echo "--- version being spent ---"
           uv run python -c "import tomllib; print(tomllib.load(open('packages/python/pyproject.toml','rb'))['project']['version'])"
 
-      - name: Publish to TestPyPI (Trusted Publishing, OIDC)
+      - name: Hand the distributions to the publish job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # The only job holding a publishing credential. Two steps, no build, no
+  # dependency installation, no repository checkout.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish to TestPyPI (Trusted Publishing, OIDC)
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: testpypi # see note 4 in the header: a reference, not a guarantee
+    permissions:
+      contents: read
+      id-token: write # required for Trusted Publishing; nothing else needs it
+    steps:
+      - name: Collect the distributions built by the verify job
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: distributions
+          path: dist/
+
+      - name: Publish to TestPyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           repository-url: https://test.pypi.org/legacy/
           packages-dir: dist
 
-      # ---------------------------------------------------------------------
-      # The round trip. This is the part that makes the rehearsal worth doing.
-      # ---------------------------------------------------------------------
-      - name: Install from TestPyPI into a clean environment and predict
+  # ---------------------------------------------------------------------------
+  # The round trip. This is the part that makes the rehearsal worth doing, and
+  # it needs no credential.
+  # ---------------------------------------------------------------------------
+  round_trip:
+    name: Install from TestPyPI into a clean environment and predict
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install uv and Python 3.12
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          python-version: "3.12"
+
+      - name: Install the published package and predict from it
         run: |
           set -euo pipefail
-          VERSION=$(uv run python -c "import tomllib; print(tomllib.load(open('packages/python/pyproject.toml','rb'))['project']['version'])")
+          VERSION=$(python -c "import tomllib; print(tomllib.load(open('packages/python/pyproject.toml','rb'))['project']['version'])")
           echo "verifying xgboost-bridge==$VERSION from TestPyPI"
 
           uv venv --python 3.12 /tmp/verify

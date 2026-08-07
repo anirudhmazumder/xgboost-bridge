@@ -67,7 +67,7 @@ if (forbidden.length) {
   console.error(`FAIL: tarball ships ${JSON.stringify(forbidden)}`);
   process.exit(1);
 }
-console.log("   no source or test files in the tarball");
+console.log("   no src/ or test/ paths in the tarball (the source itself ships inside dist/*.map -- see the note above)");
 
 // The export map must point only at files that are actually inside.
 const pkgRaw = execFileSync("tar", ["-xzOf", tarball, "package/package.json"], { encoding: "utf8" });
@@ -165,7 +165,10 @@ import { fromJSON } from "xgboost-predictor";
 const use: typeof fromJSON = fromJSON;
 void use;
 TS
-npm install --silent --no-audit --no-fund typescript@5 >/dev/null 2>&1
+# Pinned exactly, and no install scripts. This line runs inside release.yml's
+# verify job, so an unpinned range meant the compiler used to validate a
+# consumer build was whatever the registry served that day.
+npm install --silent --no-audit --no-fund --ignore-scripts typescript@5.9.3 >/dev/null 2>&1
 ./node_modules/.bin/tsc -p tsconfig.json
 echo "   tsc (module=node16, require mode) resolved the package cleanly"
 

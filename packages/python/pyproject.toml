@@ -39,8 +39,25 @@ Issues = "https://github.com/anirudhmazumder/xgboost-bridge/issues"
 export = ["xgboost==3.3.0"]
 
 [build-system]
-requires = ["hatchling"]
+# Pinned. This backend builds the wheel that goes to PyPI, so an unbounded
+# specifier means the artifact for a given tag depends on whichever hatchling the
+# index serves that day. Everything else on the publish path is version-pinned
+# and hash-locked; this was the one link that was not.
+requires = ["hatchling==1.28.0"]
 build-backend = "hatchling.build"
+
+# Scope the sdist explicitly. Without this section hatchling's default is
+# "everything under packages/python that VCS does not ignore", which shipped all
+# eleven test modules and .gitignore inside the tarball. Harmless -- the wheel is
+# built from `packages` below, so an sdist install still installs no tests -- but
+# the contents check in tools/clean_install_python.sh only ever opened the wheel,
+# so nothing would have noticed something worse arriving the same way.
+[tool.hatch.build.targets.sdist]
+include = ["src", "README.md", "LICENSE", "pyproject.toml"]
+# `.gitignore` still ships: hatchling includes it regardless of `include` and of
+# an explicit `exclude`, which was measured rather than assumed. It is inert and
+# shipping it is unremarkable -- recorded here so the next reader does not spend
+# time on it, and so this comment does not claim a scope it does not have.
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xgboost_bridge"]

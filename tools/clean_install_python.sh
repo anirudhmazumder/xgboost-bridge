@@ -25,6 +25,28 @@ SDIST="$(find "$WORK/dist" -name '*.tar.gz' | head -1)"
 echo "   wheel: $(basename "$WHEEL")"
 echo "   sdist: $(basename "$SDIST")"
 
+# The sdist's contents, not just its name. This script located the sdist, printed
+# it, and never opened it -- so the /tests/ refusal further down ran against the
+# wheel only, and hatchling's default sdist scope (everything not VCS-ignored)
+# shipped all eleven test modules for as long as that was true. An sdist install
+# still installs no tests, because `packages` scopes the wheel build, so this was
+# never a wrong number: it was a check whose reach was narrower than it read.
+python3 - "$SDIST" <<'SDIST_CHECK'
+import sys, tarfile
+
+names = tarfile.open(sys.argv[1]).getnames()
+forbidden = [n for n in names if "/tests/" in n or n.endswith("_test.py")]
+if forbidden:
+    print(f"FAIL: sdist ships test files: {forbidden[:5]}")
+    sys.exit(1)
+required = ("src/xgboost_bridge/__init__.py", "LICENSE", "README.md", "pyproject.toml")
+missing = [r for r in required if not any(n.endswith("/" + r) for n in names)]
+if missing:
+    print(f"FAIL: sdist is missing {missing}")
+    sys.exit(1)
+print(f"   sdist contents OK: {len(names)} entries, no tests, licence present")
+SDIST_CHECK
+
 echo
 echo "== verifying wheel CONTENTS =="
 python3 - "$WHEEL" <<'PY'

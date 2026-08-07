@@ -37,18 +37,35 @@ jobs:
       - name: Sync workspace
         run: uv sync
 
-      # The script name is validated against the actual directory listing rather
-      # than interpolated into the shell, so a dispatch input cannot become
-      # arbitrary command text.
+      # Two separate properties, because an earlier version of this comment
+      # claimed the second while implementing only the first:
+      #
+      #   1. The input reaches the shell through `env:` and is always quoted, so
+      #      it never becomes command text. Metacharacters and newlines are
+      #      inert. That was true before and is still true.
+      #   2. The name is checked against the actual directory listing. It was
+      #      not: `[ -f "probes/$X" ]` accepts `../`, so the input selected any
+      #      file the path resolved to. It granted no privilege -- dispatch
+      #      already requires write access, and this job has `contents: read`,
+      #      no secret and no environment -- but the comment asserting a
+      #      validation that did not exist is what would stop the next reader
+      #      from checking.
       - name: Run the probe
         env:
           PROBE_SCRIPT: ${{ inputs.script }}
         run: |
           set -euo pipefail
-          if [ ! -f "probes/$PROBE_SCRIPT" ]; then
-            echo "No such probe script: probes/$PROBE_SCRIPT"
+          available=$(cd probes && ls *.py)
+          matched=""
+          for candidate in $available; do
+            if [ "$candidate" = "$PROBE_SCRIPT" ]; then
+              matched="$candidate"
+            fi
+          done
+          if [ -z "$matched" ]; then
+            echo "No such probe script: $PROBE_SCRIPT"
             echo "Available:"
-            ls probes/*.py
+            echo "$available"
             exit 1
           fi
-          uv run python "probes/$PROBE_SCRIPT"
+          uv run python "probes/$matched"

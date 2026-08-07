@@ -934,9 +934,29 @@ email published to the index cannot be withdrawn from it or from its mirrors.
 
 ### Not acted on, and why
 
-The `esbuild` advisory (GHSA-g7r4-m6w7-qqqr) is low severity, reachable only through the
-development server on Windows, and `tsup` is a dev dependency — it is in no shipped
-artifact, and the zero-runtime-dependency count is asserted in CI. The institutional email
+The `esbuild` advisory (GHSA-g7r4-m6w7-qqqr) does not apply. **Corrected 2026-08-06,** after a
+security audit re-derived it: the original entry got three things wrong and reasoned from the
+wrong facts. It is rated **Moderate** (CVSS 5.3), not low; the **Windows qualifier is not in
+that advisory at all** — it is that esbuild's dev server sets `Access-Control-Allow-Origin: *`
+by default, which is platform-independent; and the lockfile has **esbuild 0.27.7**, while the
+advisory affects `<= 0.24.2` and was fixed in 0.25.0, so there was never a risk here to accept.
+
+The one clause that held is that `tsup` is a dev dependency and is in no shipped artifact.
+
+The methodological point outlives the corrections. The entry dismissed the advisory using
+properties *of the advisory* — its severity, its platform — rather than the two facts that
+actually settle it: **the pinned version is past the fix**, and **this project never starts an
+esbuild dev server**, which is the argument that survives a version bump. Zero hits for
+`--serve`, `serve(`, `devServer` or `watch` outside `node_modules`; `tsup.config.ts` has no
+`watch`; every workflow runs one-shot `tsup`.
+
+And looking the package up in an advisory database was not the same as reading it. The audit
+that produced this entry did not open `esbuild/install.js`, which contains the install-time
+execution path that mattered: an integrity-free fallback that fetches a tarball over plain
+`https.get`, unpacks it by hand, and `chmod 0755`s the result, plus an `ESBUILD_BINARY_PATH`
+override that rewrites `lib/main.js`. Dormant, because all 26 `@esbuild/*` platform packages
+are sha512-locked and resolve on both CI platforms — but it was live during every `npm ci`,
+including inside the jobs that held publishing credentials. That is addressed under D054. The institutional email
 in commit metadata is the owner's to decide and would require a history rewrite on an
 already-public repository.
 
@@ -1124,3 +1144,163 @@ signature instead. The counts are properties of a libm, and pinning them is what
 tests darwin-only.
 
 Python suite 960 → 976 for this change, and 977 with the concurrently-merged audit work of D052.
+
+## D054 — Security audit: the credential outlived the gate, and three checks read wider than they reached
+
+*2026-08-06* — **corrects D052's esbuild assessment; supersedes nothing numerical**
+
+A read-only security audit ran against `c6eff20` from an independent context, covering supply
+chain, workflow permissions, environment gating, untrusted-input handling in both readers, and
+the built distributions re-derived rather than taken from the packaging scripts' own output.
+Fifteen items; the ones acted on are below. What it verified as sound is recorded at the end,
+because that list is as useful as the findings.
+
+### The finding that mattered: gate ordering is not a control
+
+Both publish workflows were a single job that declared `id-token: write` and then ran `npm ci`,
+`uv sync`, the suites and two build scripts *before* the publish step. `release-testpypi.yml`'s
+own header called that a safeguard: "the full gate runs BEFORE anything is published."
+
+It was not one. `ACTIONS_ID_TOKEN_REQUEST_URL` and its token are present for a job's entire
+duration, so a dependency executing an install script during `npm ci` could have minted a
+publishing token and uploaded its own artifact at step one — and the gate would still have
+passed afterwards. Step order constrains nothing when the credential does not depend on it.
+
+**This is the independent-oracle principle with a different noun.** A gate and the thing it
+gates must not share a trust domain; when they do, the gate cannot constrain what holds the
+credential, exactly as a check cannot catch a defect its oracle shares.
+
+Both workflows are now three jobs: `verify` holds no credential and cannot publish, `publish`
+holds `id-token: write` and does nothing but download an artifact and call the publisher, and
+the TestPyPI round trip runs credential-free afterwards. The publisher action is third-party
+code inside the credentialed job — unavoidable, it is what uploads, and it is SHA-pinned.
+
+Also: `release.yml`'s two jobs declared only `id-token: write` with no top-level `permissions`
+block, so `contents` was `none` and `actions/checkout` would have failed on the first ever run.
+Fixed, and `publish-javascript` now `needs: publish-python`, so two irreversible uploads cannot
+disagree about what 1.0 is.
+
+### The environment gate did not exist, and one file said it did
+
+`gh api .../environments` returns `total_count: 0`. GitHub creates an environment on first
+reference **with no protection rules**, so the first dispatch would have published unreviewed.
+`release.yml` was honest about this; `release-testpypi.yml:17` listed "`environment: testpypi`
+carries a required reviewer" among the reasons it "cannot fire accidentally". That was a spec
+contradicting the evidence, in the one file that performs an irreversible upload.
+
+Rewritten to separate what the file configures from what repository settings must supply, and
+to record that the Trusted Publisher entry must itself name the environment — an entry with a
+blank environment field accepts a token minted from any environment, or none, so the binding
+has to exist on both sides to mean anything. Creating the environment and the publisher remains
+the owner's, and is not done.
+
+### Three checks whose message read wider than their reach
+
+The pattern connecting them is D022's, one level out: the executable check was correct and the
+prose around it was not, so the record made it look handled.
+
+- **The dependency count read one field.** `ci.yml` counted `dependencies` while its comment
+  claimed to guard against `package.json` being edited at all; a `peerDependencies` or
+  `optionalDependencies` entry passed silently. Now every install-time field.
+- **The sdist was never opened.** `tools/clean_install_python.sh` located the sdist, printed
+  its name, and checked only the wheel — so hatchling's default scope shipped all eleven test
+  modules inside the tarball. Never a wrong number, because `packages` scopes the wheel build
+  and an sdist install still installs no tests. Now scoped in the manifest and inspected by the
+  script. `.gitignore` still ships: hatchling includes it regardless of `include` and of an
+  explicit `exclude`, measured rather than assumed, and the comment says so.
+- **"No source files in the tarball" was true only on a technicality.** `sourcemap: true` puts
+  all four source files verbatim inside `dist/*.map`, about 180 kB of the 294 kB published. The
+  check tested for `src/` *paths*. No local-path leak — `sources` is relative, and a grep of
+  every `dist/` file for the owner's directory names and email finds nothing — and the
+  repository is public MIT, so shipping source is defensible. The message now says what it
+  checks.
+
+### Install-time code execution removed from the publish path
+
+`esbuild` and `fsevents` are the only two packages with install scripts, and no workflow passed
+`--ignore-scripts`, so `esbuild/install.js` ran during every `npm ci` — including inside the
+jobs that held publishing credentials. Now `--ignore-scripts` in all three workflows and in
+`tools/clean_install_js.sh`, **verified** by moving `node_modules` aside and confirming a clean
+`npm ci --ignore-scripts` still builds, type-checks and passes 114 tests: the binary comes from
+a locked, hashed platform package, so the script had nothing to do.
+
+Two unpinned links on that path are now pinned: `[build-system] requires = ["hatchling"]`, which
+built the PyPI wheel from whatever version the index served that day, and
+`npm install typescript@5` inside the consumer-compile check.
+
+### Untrusted input: one contract breach, one uncatchable hang
+
+- **A JSON integer too large for a float64 escaped as `OverflowError`.** `1e400` was already
+  refused — it parses as a float and arrives as `inf`. A 401-digit integer *literal* is also
+  valid JSON, is under CPython's 4300-digit parse ceiling, and arrives as a Python `int`;
+  `np.float32` of it raises before any refusal in `predict.py` runs, and `np.errstate` does not
+  cover it because it is a Python conversion error rather than a numpy warning. A caller
+  following the documented contract and writing `except XGBoostBridgeError` got an unhandled
+  exception. Now structured at both cast sites, pinned by five tests including one asserting the
+  input still overflows an unguarded cast — otherwise a future numpy returning `inf` would make
+  the guard pass for the wrong reason. **The JavaScript reader never had this**, because
+  `JSON.parse` returns float64 unconditionally and the same input arrives as `Infinity`; that
+  asymmetry is the parse-precision seam the format already cares about, appearing from the other
+  side.
+- **The public `Predictor` constructor did not establish termination.** `fromJSON` runs the
+  cycle check, but the constructor is exported and a hand-built `LoadedArtifact` with a cyclic
+  child set did not throw — it spun, and the process had to be killed. Not reachable from
+  `fromJSON`, and not from handing it a parsed artifact, so it is an API footgun rather than an
+  untrusted-input path; but it is the only malformed input in this package whose consequence a
+  caller cannot catch, which is why `artifact.ts` refuses it at load. The constructor now runs
+  the same check. That repeats work `fromJSON` already did — one extra O(nodes) pass on a path
+  that is not the hot one, chosen over a flag recording whether validation happened, which is
+  the kind of coupling that goes stale. The test carries an explicit timeout, because its
+  regression mode is the hang it exists to prevent and an untimed test would stall CI rather
+  than fail it.
+
+### Smaller items
+
+`probe-platform.yml`'s comment claimed the dispatch input was "validated against the actual
+directory listing"; the guard was `[ -f "probes/$X" ]`, which accepts `../`. It granted no
+privilege — dispatch already requires write access, the job has `contents: read`, no secret and
+no environment — but an asserted validation that does not exist is what stops the next reader
+from checking. Now matched against the listing itself. The `env:` indirection was already the
+correct pattern against injection and is unchanged.
+
+`.claude/worktrees/` was excluded only by `.git/info/exclude`, which is per-clone and does not
+travel; moved into the tracked `.gitignore`. The two private orchestration files stay where they
+are, deliberately — an entry in a tracked `.gitignore` would itself be evidence they exist.
+
+Two tracked agent files instructed a contributor with beliefs this repository records as
+measured-false: `numeric-core.md` gave the logistic intercept as `logit(base_score)`, which
+`CLAUDE.md` marks superseded, and `numeric-reviewer.md` carried a garbled remnant of the
+two-signal dart premise. Both corrected, with the D053 engine-read rule added.
+
+### Left to the owner, and not done
+
+A required-reviewer rule on the `testpypi` and `release` environments; the PyPI and TestPyPI
+Trusted Publisher entries, each naming its environment; branch protection or a ruleset on `main`
+(without one, `workflow_dispatch`-only is a real control against *accidental* firing but not
+against a compromised account, since anyone with write access can edit a workflow and dispatch
+it); and npm Trusted Publishing, which would remove the planned `NODE_AUTH_TOKEN` and make the
+npm side symmetric with PyPI's. No secret exists in the repository today — verified, zero.
+
+### Verified sound, and worth recording as such
+
+No prototype-pollution sink in either reader: `__proto__` at every level is refused, and
+`Object.prototype` is unpolluted after every attempt. `OUTPUT_FUNCTIONS` is `Object.create(null)`
+and frozen, so `"constructor"` and `"valueOf"` are refused as transform names. Cycles, 2-cycles,
+and a back-edge at the end of a 100,000-node chain are all refused in milliseconds; a 200,000-node
+chain and a 200,000-node overlapping DAG both load and walk without amplification. Allocation is
+bounded by actual parsed length everywhere — no length field drives an allocation. `elementAt`
+converts an out-of-bounds typed-array read into a raise rather than letting `undefined` become
+`NaN` and route down the missing-value branch. An unreachable node with out-of-range links is
+refused, which is *stricter* than FORMAT.md §13 requires, and in the right direction.
+
+Zero JS runtime dependencies confirmed by walking the lockfile rather than trusting the field:
+100 entries, 99 `dev: true`, the hundredth is the root. All 99 resolve to `registry.npmjs.org`
+with sha512 integrity; `uv.lock`'s 17 registry packages are sha256-hashed on sdist and every
+wheel. No package from the recent `chalk`/`debug`/`cross-spawn` incident families. Nothing is
+fetched at consumer install time by either package, and neither has any lifecycle script. All
+four pinned action SHAs were dereferenced against upstream and match the tags their trailing
+comments claim. No `pull_request_target`, no `workflow_run`, no cache configured anywhere. The
+Python package contains no `eval`, `exec`, `pickle`, `subprocess`, `open`, or network import,
+and executes nothing at import time. No secret, token or key anywhere in the tree or in any of
+464 objects across all five refs. `CLAUDE.local.md` and `PLAN.md` are absent from history, from
+all tracked content, from `.gitignore`, and from all three built distributions.

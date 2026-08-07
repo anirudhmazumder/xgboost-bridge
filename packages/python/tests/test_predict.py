@@ -1748,3 +1748,55 @@ def test_a_freshly_exported_zero_tree_model_loads_and_returns_its_intercept() ->
     # `base_score=0.5` passed explicitly puts the intercept in link space,
     # where it is exactly -0.0 (FORMAT.md section 6.3).
     assert _bits(predictor.intercept) == "0x80000000"
+
+
+# ---------------------------------------------------------------------------
+# A JSON integer too large for a float64 is refused structurally
+#
+# Found by the security audit. `1e400` was already handled -- it parses as a
+# float and arrives as `inf`, which the finiteness refusal catches. A 401-digit
+# integer *literal* is also valid JSON, is under CPython's 4300-digit int-parse
+# ceiling, and arrives as a Python `int`; `np.float32` of it raises OverflowError
+# before any refusal in this module runs.
+#
+# That is not a wrong number, so it is the acceptable failure direction. It is
+# still a contract breach: `Predictor.from_json` documents MalformedTreeError for
+# a non-finite `node_values` entry or `intercept`, so a caller writing
+# `except XGBoostBridgeError` got an unhandled exception -- a 500 where it meant
+# a 400. The JavaScript reader never had this, because `JSON.parse` returns
+# float64 unconditionally and the same input arrives as `Infinity`.
+# ---------------------------------------------------------------------------
+
+_HUGE_JSON_INTEGER = int("1" + "0" * 400)
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+def test_intercept_that_is_a_json_integer_too_large_for_float64_is_refused(
+    sign: int,
+) -> None:
+    artifact = _artifact(intercept=sign * _HUGE_JSON_INTEGER)
+    with pytest.raises(errors.MalformedTreeError) as caught:
+        Predictor.from_json(artifact)
+    assert caught.value.field == "intercept"
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+def test_node_values_entry_too_large_for_float64_is_refused(sign: int) -> None:
+    artifact = _artifact()
+    artifact["trees"][0]["node_values"][0] = sign * _HUGE_JSON_INTEGER
+    with pytest.raises(errors.MalformedTreeError) as caught:
+        Predictor.from_json(artifact)
+    assert caught.value.field == "node_values"
+
+
+def test_the_huge_integer_really_does_overflow_an_unguarded_cast() -> None:
+    """The guard is only worth having if the input still overflows.
+
+    Without this, a future numpy that returns `inf` instead of raising would make
+    the two tests above pass for a different reason and the guard would rot
+    untested.
+    """
+    with pytest.raises(OverflowError):
+        np.float32(_HUGE_JSON_INTEGER)
+    # And the value is genuinely beyond float64, not merely beyond float32.
+    assert _HUGE_JSON_INTEGER > int(np.finfo(np.float64).max)

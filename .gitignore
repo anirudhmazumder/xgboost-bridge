@@ -6,3 +6,8 @@ __pycache__/
 node_modules/
 dist/
 .claude/settings.local.json
+
+# Local agent worktrees: generic tooling state, per-clone, never part of any
+# distribution. Tracked here rather than only in .git/info/exclude so the
+# exclusion travels with a fresh clone.
+.claude/worktrees/

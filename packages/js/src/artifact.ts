@@ -611,9 +611,16 @@ const SETTLED = 2;
  * A shared subtree — two parents pointing at one child, no cycle — is not
  * refused. It terminates, so it is not this check's business.
  */
-function checkReachableSubgraphTerminates(
-  leftChildren: readonly number[],
-  rightChildren: readonly number[],
+// Exported so the `Predictor` constructor can establish the same property. That
+// constructor is public and is not required to go through `fromJSON`, and a
+// cyclic child set is the one malformed input whose consequence is a hang rather
+// than a throw -- "not something a caller can catch". `ArrayLike<number>` rather
+// than `readonly number[]` so it accepts both the raw parsed arrays here and the
+// `Int32Array`s a `LoadedTree` carries; the body uses only `.length` and index
+// access.
+export function checkReachableSubgraphTerminates(
+  leftChildren: ArrayLike<number>,
+  rightChildren: ArrayLike<number>,
   location: string,
 ): void {
   const colour = new Uint8Array(leftChildren.length);

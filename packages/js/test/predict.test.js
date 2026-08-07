@@ -596,3 +596,51 @@ test("fromJSON takes a parsed object and never a string or a path", () => {
   const predictor = fromJSON(JSON.parse(JSON.stringify(WORKED_EXAMPLE)));
   assert.equal(bits32(predictor.margin({ feature_a: 0.25, feature_b: 9.0 })), 0x3e8f9921);
 });
+
+// ---------------------------------------------------------------------------
+// The public constructor establishes termination, it does not assume it
+//
+// Found by the security audit. `fromJSON` runs the cycle check, but `Predictor`
+// is exported and a caller can hand it a hand-built `LoadedArtifact`. A cyclic
+// child set there did not throw -- it spun forever, and the process had to be
+// killed. That is the only malformed input in this package whose consequence a
+// caller cannot catch, which is why artifact.ts refuses it at load in the first
+// place; the constructor now refuses it too.
+// ---------------------------------------------------------------------------
+
+// An explicit timeout, because this test's regression mode is the hang it
+// exists to prevent: without the constructor check the call below never
+// returns, and an untimed test would stall CI rather than fail it.
+test("the Predictor constructor refuses a cyclic tree instead of hanging", { timeout: 5000 }, () => {
+  const loaded = loadArtifact(stumpArtifact(0.25, [1.5]));
+
+  // A two-node cycle reachable from the root: node 0's left child is 1, and
+  // node 1's left child is 0. Both are internal, so the walk never reaches a
+  // leaf. Built directly as typed arrays, which is what the constructor takes.
+  const cyclic = {
+    ...loaded,
+    trees: [
+      {
+        leftChildren: Int32Array.from([1, 0]),
+        rightChildren: Int32Array.from([1, 0]),
+        splitIndices: Int32Array.from([0, 0]),
+        nodeValues: Float32Array.from([0.5, 0.5]),
+        defaultLeft: Uint8Array.from([0, 0]),
+      },
+    ],
+  };
+
+  assert.throws(
+    () => new Predictor(cyclic),
+    (error) => error instanceof MalformedArtifactError,
+    "a cycle reachable from the root must be refused by the constructor",
+  );
+});
+
+test("the constructor still accepts what fromJSON produced", () => {
+  // The guard above must not reject valid input: every corpus artifact has to
+  // survive being passed through the constructor a second time.
+  const loaded = loadArtifact(stumpArtifact(0.25, [1.5]));
+  const predictor = new Predictor(loaded);
+  assert.equal(typeof predictor.margin, "function");
+});

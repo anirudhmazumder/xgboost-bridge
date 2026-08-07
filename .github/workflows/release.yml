@@ -42,117 +42,173 @@ on:
         required: true
         type: string
 
+# Least privilege, stated rather than inherited. Once any scope is named,
+# every unnamed scope becomes `none` -- so a job declaring only
+# `id-token: write` gets `contents: none` and its `actions/checkout` cannot
+# read the repository. Both publish jobs had exactly that shape, which would
+# have failed on the first-ever run.
+permissions:
+  contents: read
+
+# ---------------------------------------------------------------------------
+# Why the work and the credentials are in different jobs
+#
+# The earlier version ran `npm ci`, `uv sync`, the suites and two build scripts
+# inside the same jobs that held `id-token: write` and `NODE_AUTH_TOKEN`. The
+# OIDC request variables and the npm token are present for a job's whole
+# duration, so running the gate first constrains nothing: a dependency
+# executing an install script could mint a publishing token before any test
+# ran. Ordering is not a control when the credential does not depend on it.
+#
+# `verify` therefore holds no credential and cannot publish. The two publish
+# jobs hold a credential and do nothing but download an artifact and upload it.
+# ---------------------------------------------------------------------------
 jobs:
-  publish-python:
-    name: Publish xgboost-bridge to PyPI
+  verify:
+    name: Full gate, then build both distributions
     runs-on: ubuntu-latest
-    # No environment named "release" exists in this repository yet -- see the
-    # file header. Until it is created with a required-reviewer rule, this
-    # name is a label, not a lock.
-    environment: release
     permissions:
-      # Required for PyPI trusted publishing (OIDC). No PyPI API token is, or
-      # should ever be, stored in this repository.
-      id-token: write
+      contents: read # deliberately no id-token: this job must not be able to publish
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      # The Python suite collects the cross-language parity harness, which
-      # shells out to `node` and refuses to measure against a `dist/` older
-      # than `src/`. Node and a fresh bundle therefore have to exist before
-      # pytest runs, exactly as in the CI workflow.
       - name: Set up Node.js 20
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
 
+      # --ignore-scripts: the one dependency here with an install script is
+      # esbuild, whose binary arrives from a locked, hashed platform package, so
+      # the script has nothing left to do.
       - name: Install JavaScript dependencies
         working-directory: packages/js
-        run: npm ci
+        run: npm ci --ignore-scripts
 
-      - name: Build the JavaScript bundle (required by the parity harness)
+      - name: Type-check (separate from the build, per D011)
+        working-directory: packages/js
+        run: npm run typecheck
+
+      - name: Build the JavaScript bundle
         working-directory: packages/js
         run: npm run build
+
+      - name: Run JavaScript test suite against the built bundle
+        working-directory: packages/js
+        run: npm run test:nobuild
 
       - name: Install uv and Python 3.12
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           python-version: "3.12"
 
-      - name: Sync workspace (packages/python, fixtures)
+      - name: Sync workspace
         run: uv sync
 
-      # The same verification the CI workflow runs, repeated here rather than
-      # trusted from a prior job -- a publish workflow that skips its own
-      # checks because "CI already passed" is trusting a different commit's
-      # result for this one. The JavaScript publish job below has always done
-      # this; the Python job did not, and an untested wheel is the artifact
-      # that cannot be withdrawn.
       - name: Run Python test suite
         run: uv run pytest
 
-      # The wheel a user receives, exercised as an installed package from
-      # outside the repository, before it can be uploaded. The source tree
-      # passing says nothing about the distribution.
-      - name: Verify the built distribution installs and predicts
+      - name: Cross-language parity, both measurement points
+        run: uv run python parity/run_parity.py
+
+      - name: Cross-language parity at scale (~100,000 adversarial rows)
+        run: uv run python parity/run_parity_scale.py
+
+      - name: Verify the wheel's contents, then install and predict
         run: ./tools/clean_install_python.sh
 
-      - name: Build sdist and wheel
+      - name: Verify the tarball's contents, then install and predict
+        run: ./tools/clean_install_js.sh
+
+      - name: Build the Python distributions
         run: uv build packages/python --out-dir dist
 
-      - name: Publish to PyPI (trusted publishing, OIDC)
+      # Packed here rather than in the credentialed job, so that job needs no
+      # node_modules and runs no install script.
+      - name: Pack the npm tarball
+        working-directory: packages/js
+        run: npm pack --pack-destination ../../dist
+
+      - name: Show exactly what would be published
+        run: |
+          ls -l dist
+          echo "--- versions being spent, permanently ---"
+          uv run python -c "import tomllib; print('python:', tomllib.load(open('packages/python/pyproject.toml','rb'))['project']['version'])"
+          node -p "'npm:    ' + require('./packages/js/package.json').version"
+
+      - name: Hand the distributions to the publish jobs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-python:
+    name: Publish xgboost-bridge to PyPI
+    needs: verify
+    runs-on: ubuntu-latest
+    # No environment named "release" exists in this repository yet -- see the
+    # file header. Until it is created with a required-reviewer rule, this name
+    # is a label, not a lock.
+    environment: release
+    permissions:
+      contents: read
+      # Required for PyPI trusted publishing (OIDC). No PyPI API token is, or
+      # should ever be, stored in this repository.
+      id-token: write
+    steps:
+      - name: Collect the distributions built by the verify job
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: distributions
+          path: dist/
+
+      # The npm tarball travels in the same artifact; the publisher must not see
+      # it, so it is removed before the upload rather than after.
+      - name: Keep only the Python distributions
+        run: rm -f dist/*.tgz && ls -l dist
+
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist
 
   publish-javascript:
     name: Publish xgboost-predictor to npm
+    # Ordered after the PyPI upload deliberately. Both are irreversible, so if
+    # one must fail it should be the second: a published Python package with no
+    # npm counterpart is a gap, whereas the reverse plus a failed retry leaves
+    # the two registries disagreeing about what 1.0 is.
+    needs: [verify, publish-python]
     runs-on: ubuntu-latest
-    # Same unconfigured environment as publish-python; see the file header.
     environment: release
-    defaults:
-      run:
-        working-directory: packages/js
     permissions:
+      contents: read
       # Required alongside NODE_AUTH_TOKEN for `npm publish --provenance`.
+      #
+      # npm now supports Trusted Publishing, which would remove NODE_AUTH_TOKEN
+      # entirely and make this symmetric with the PyPI side above. Configuring it
+      # is an npm-account change, so it is recorded here rather than assumed.
       id-token: write
     steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-
-      - name: Set up Node.js 20
+      - name: Set up Node.js 20 with the npm registry
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Collect the tarball packed by the verify job
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: distributions
+          path: dist/
 
-      # Same three checks the CI workflow runs, repeated here rather than
-      # trusted from a prior job: a publish workflow that skips its own
-      # verification because "CI already passed" is trusting a different
-      # commit's result for this one.
-      - name: Type-check
-        run: npm run typecheck
-
-      - name: Build (bundle to dist/)
-        run: npm run build
-
-      - name: Run JavaScript test suite
-        run: npm run test:nobuild
-
-      # The tarball a user receives, exercised as an installed package from
-      # outside the repository, before it can be uploaded. Symmetric with the
-      # Python job above: the source tree passing says nothing about the
-      # distribution, and an npm version number cannot be reused once taken.
-      - name: Verify the packed tarball installs and predicts
-        working-directory: ${{ github.workspace }}
-        run: ./tools/clean_install_js.sh
-
-      - name: Publish to npm (with provenance)
-        run: npm publish --access public --provenance
+      - name: Publish the packed tarball
+        run: |
+          set -euo pipefail
+          TARBALL=$(ls dist/*.tgz)
+          echo "publishing $TARBALL"
+          npm publish "$TARBALL" --access public --provenance
         env:
-          # No such secret exists in this repository yet; see the file header.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

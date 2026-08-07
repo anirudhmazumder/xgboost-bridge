@@ -46,7 +46,7 @@ jobs:
 
       - name: Install JavaScript dependencies
         working-directory: packages/js
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Build the JavaScript bundle (required by the parity harness)
         working-directory: packages/js
@@ -112,14 +112,21 @@ jobs:
           node-version: "20"
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       # Zero JS runtime dependencies is non-negotiable (D009). Assert it
       # numerically rather than assuming package.json was never edited.
+      #
+      # Every field that can put code in a consumer's tree, not just
+      # `dependencies` -- counting that one alone let a `peerDependencies` or
+      # `optionalDependencies` entry through a check whose comment claimed to
+      # guard against package.json being edited at all.
+      # packages/js/test/bundle.test.js covers the same ground and additionally
+      # scans dist/ for import/require; this is the cheap early signal.
       - name: Assert zero JS runtime dependencies
         run: |
-          COUNT=$(node -p "Object.keys(require('./package.json').dependencies || {}).length")
-          echo "Runtime dependency count: $COUNT"
+          COUNT=$(node -p "['dependencies','peerDependencies','optionalDependencies','bundledDependencies','bundleDependencies'].reduce((n,k)=>n+Object.keys(require('./package.json')[k]||{}).length,0)")
+          echo "Runtime dependency count, every install-time field: $COUNT"
           if [ "$COUNT" -ne 0 ]; then
             echo "FAIL: expected 0 runtime dependencies, found $COUNT"
             exit 1

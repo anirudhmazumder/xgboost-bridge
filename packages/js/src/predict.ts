@@ -43,6 +43,7 @@ import {
   LEAF_CHILD,
   MalformedArtifactError,
   NonFiniteFeatureError,
+  checkReachableSubgraphTerminates,
   loadArtifact,
   type LoadedArtifact,
   type LoadedTree,
@@ -148,6 +149,26 @@ export class Predictor {
         `one of: ${OUTPUT_TRANSFORM_NAMES.join(", ")}`,
       );
     }
+
+    // The walk below assumes every path from a root reaches a leaf. `fromJSON`
+    // establishes that, but this constructor is public and a caller can hand it
+    // a hand-built `LoadedArtifact` -- and a cycle there does not throw, it
+    // spins forever, which is the one failure mode a caller cannot catch. So the
+    // property is established here rather than assumed, for the same reason the
+    // transform name is checked above: a walk whose correctness depends on a
+    // property of its input is correct until someone changes the input.
+    //
+    // This repeats the check `fromJSON` already ran -- one extra O(nodes) pass at
+    // load time, on a path that is not the hot one. The alternative is a flag
+    // recording whether validation happened, which is the kind of coupling that
+    // goes stale silently.
+    loaded.trees.forEach((tree, index) => {
+      checkReachableSubgraphTerminates(
+        tree.leftChildren,
+        tree.rightChildren,
+        `trees[${index}]`,
+      );
+    });
 
     this.formatVersion = loaded.formatVersion;
     this.objective = loaded.objective;

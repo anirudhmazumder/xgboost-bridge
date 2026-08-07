@@ -277,7 +277,24 @@ def _narrow(value: object, field: str, position: int | None, location: str | Non
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise _malformed(field, value, f"a JSON number{where}", location)
     with np.errstate(over="ignore"):
-        narrowed = np.float32(value)
+        try:
+            narrowed = np.float32(value)
+        except OverflowError:
+            # A JSON integer literal with more digits than a float64 can hold
+            # arrives as a Python `int`, not a float, and CPython's int-to-double
+            # conversion raises before the finiteness refusal below can see it.
+            # `np.errstate` does not cover this -- it is a Python conversion
+            # error, not a numpy overflow warning.
+            #
+            # 401 digits is valid JSON and is under CPython's 4300-digit
+            # int-parse ceiling, so an artifact can carry one. Without this the
+            # caller gets a bare OverflowError, which is not in the contract
+            # `from_json` documents, so `except XGBoostBridgeError` misses it.
+            # `1e400` was already handled, because that parses as a float and
+            # arrives as `inf`.
+            raise _malformed(
+                field, value, f"a finite float32 value{where}", location
+            ) from None
     if not np.isfinite(narrowed):
         raise _malformed(
             field, value, f"a finite float32 value{where}", location
@@ -412,7 +429,29 @@ def _read_node_values(raw: object, location: str) -> np.ndarray:
             )
 
     with np.errstate(over="ignore"):
-        values = np.asarray(raw, dtype=np.float32)
+        try:
+            values = np.asarray(raw, dtype=np.float32)
+        except OverflowError:
+            # See _narrow: a JSON integer too large for a float64 arrives as a
+            # Python `int` and raises here, before the finiteness check below.
+            # Locate it so the refusal names a position rather than the array.
+            # Located by attempting the same conversion, not by comparing against
+            # a float64 bound: `huge_int > np.finfo(np.float64).max` converts the
+            # int to reach the comparison and raises the very error being
+            # handled. Only reached on the failure path, so the cost is moot.
+            position = 0
+            for index, value in enumerate(raw):
+                try:
+                    np.float32(value)
+                except OverflowError:
+                    position = index
+                    break
+            raise _malformed(
+                "node_values",
+                raw[position],
+                f"a finite float32 value at position {position}",
+                location,
+            ) from None
     finite = np.isfinite(values)
     if not bool(finite.all()):
         position = int(np.argmin(finite))

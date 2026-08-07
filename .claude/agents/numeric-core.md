@@ -25,7 +25,11 @@ Casting only the sample value is correct on most rows and wrong on a few. This g
 
 **Float32 discipline extends to parsing.** `JSON.parse` returns float64 unconditionally. Any code that reads or stores a threshold must preserve float32 representation, or the tree walk will read as correct and produce wrong predictions on a fraction of rows.
 
-**`base_score` space is per-objective and is never inferred by analogy.** `binary:logistic` stores probability space (margin intercept is `logit(base_score)`); Cox requires `ln(base_score)`; `reg:squarederror` may have been overwritten at fit time by `boost_from_average`. If the space for an objective you are handling is not verified on disk under `probes/`, stop and report — do not guess.
+**`base_score` space is per-objective and is never inferred by analogy.** `binary:logistic` stores probability space; Cox stores hazard-ratio space; `reg:squarederror` is already margin space. If the space for an objective you are handling is not verified on disk under `probes/`, stop and report — do not guess.
+
+**Do not compute the intercept.** Read it out of the engine — `objectives.observe_intercept`. XGBoost derives it with the platform's `logf`, which IEEE-754 does not require to be correctly rounded, and XGBoost's own answer differs between darwin/arm64 and linux/x86_64 by 1 ULP on 29 of 58 discriminating inputs. No fixed recipe is exact on both platforms, so deriving one guarantees a spurious refusal somewhere. See D053 and `probes/platform_log.md`.
+
+Two beliefs a reasonable person would guess, both measured false, so do not reintroduce either: the logistic intercept is **not** `logit(base_score)` — textbook `log(p/(1-p))` breaches the `1e-6` gate at `7.63e-06`; it is `-log(f32(f32(1/p) - 1))` with `p` clamped to `[f32(1e-6), f32(1 - 1e-6)]` while stored unclamped. And with **zero trees and `boost_from_average == "1"`** the margin is the RAW `base_score`, not any link transform.
 
 **Fail loudly.** Unknown objective, booster, field, or version marker raises. Never default.
 
