@@ -59,7 +59,7 @@ from .errors import (
     UnsupportedObjectiveError,
 )
 from .objectives import OUTPUT_TRANSFORMS, observe_intercept
-from .trees import LEAF_CHILD, extract_trees, walk_margin
+from .trees import LEAF_CHILD, extract_trees, reachable_nodes, walk_margin
 from .validate import validate_source_model
 
 __all__ = ["DEFAULT_TESTED_VERSIONS", "export_model", "to_json"]
@@ -311,6 +311,15 @@ def _verify_against_source_margin(booster: Any, artifact: dict[str, Any]) -> Non
     if first is not None:
         raise MarginMismatchError(first[0], first[1], first[2], mismatches, len(rows))
 
+    # Only now. Coverage is a statement about the sufficiency of a check that
+    # PASSED -- so it runs after the comparison, never before it. Asserting it
+    # first inverts the ordering: corrupted thresholds can make a leaf's
+    # feature-box empty, so the coverage check would fire on an artifact whose
+    # actual defect is a wrong number, and report the weaker finding. Measured:
+    # doing so replaced MarginMismatchError with a sample complaint in
+    # test_export_refuses_node_values_read_from_the_wrong_source_array.
+    _assert_sample_reaches_every_live_leaf(trees, rows)
+
 
 def _self_check_rows(
     trees: Sequence[Mapping[str, Any]], feature_count: int
@@ -341,6 +350,72 @@ def _self_check_rows(
     rows = _leaf_reaching_rows(trees, feature_count)
     rows.extend(_missing_value_rows(feature_count))
     return np.asarray(rows, dtype=np.float64)
+
+
+def _assert_sample_reaches_every_live_leaf(
+    trees: Sequence[Mapping[str, Any]], sample: np.ndarray
+) -> None:
+    """Require the sample to actually reach every live leaf, and say so if not.
+
+    This replaces an argument with a measurement. ``_leaf_reaching_rows``
+    justified its own sufficiency by reasoning that a node whose feature-interval
+    is empty "is reachable in the graph but reachable by **no input at all**, so
+    no row can exist for it and no change to it can alter any prediction."
+
+    **That reasoning is false for missing values.** ``NaN`` routes by
+    ``default_left`` and ignores thresholds entirely, so a node whose finite box
+    is empty can still be reached -- by a row carrying ``NaN`` in the right
+    column. A constructed 7-node case has a leaf reachable only via
+    ``[nan, 5.0]``: the box tracking drops it, ``_representative_row`` returns
+    ``None``, the row is skipped silently, and corrupting that leaf's value
+    leaves every self-check margin identical. The mandatory self-check of
+    FORMAT.md section 8.3 would pass over a wrong leaf.
+
+    Latent rather than live: a search of 162 fitted models -- ``exact``/``hist``/
+    ``approx`` x depth 4/8/12 x 0/30/70% missing x 2/6 columns x 3 seeds, all at
+    ``min_child_weight=0`` -- found **0** live nodes with an empty box. So this
+    has never fired on a real model, and the argument it replaces was still
+    wrong. Asserting coverage costs one walk over a sample that is already being
+    walked, and converts "no row can exist for it" from a claim into a check.
+
+    Raises:
+        MalformedTreeError: some live leaf is reached by no row in the sample.
+            Reported per tree, with the leaf indices, because the actionable fix
+            is to extend the sample rather than to weaken the check.
+    """
+    for index, tree in enumerate(trees):
+        left = tree["left_children"]
+        live = reachable_nodes(tree)
+        leaves = {node for node in live if left[node] == LEAF_CHILD}
+        if not leaves:
+            continue
+
+        reached: set[int] = set()
+        for row in sample:
+            node = 0
+            while left[node] != LEAF_CHILD:
+                value = np.float32(row[tree["split_indices"][node]])
+                if np.isnan(value):
+                    go_left = bool(tree["default_left"][node])
+                elif value < np.float32(tree["node_values"][node]):
+                    go_left = True
+                else:
+                    go_left = False
+                node = tree["left_children"][node] if go_left else tree["right_children"][node]
+            reached.add(node)
+
+        missed = sorted(leaves - reached)
+        if missed:
+            raise MalformedTreeError(
+                "<self-check sample>",
+                missed,
+                (
+                    f"a sample reaching every live leaf; leaves {missed} in tree "
+                    f"{index} are reached by no row, so a wrong value at any of "
+                    f"them would pass the self-check"
+                ),
+                f"trees[{index}]",
+            )
 
 
 def _leaf_reaching_rows(

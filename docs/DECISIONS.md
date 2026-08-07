@@ -1717,3 +1717,96 @@ every JavaScript ULP test green — it would score *better* against mpmath — a
 the parity harness, which lives in the Python suite.
 
 Suites: Python 1041 → 1056, Node 138 → 148.
+
+## D060 — The three sharpest open items, closed; npm moves to Trusted Publishing
+
+*2026-08-06* — **completes D058's not-acted-on list except where noted; supersedes release.yml's npm token**
+
+### FORMAT.md §5.5 is now structural on the TypeScript side
+
+The rule — one arithmetic operation per statement, with a named intermediate — was
+AST-enforced in Python since D046 and enforced by nothing in TypeScript. That asymmetry was the
+sharpest thing left, because of *which direction* it fails in: a fused `Math.fround(a * b + c)`
+contracts to a single rounding, which is **more accurate** than two rounded operations, so it
+would score *better* against the mpmath reference and leave every JavaScript ULP test green.
+Nothing in the JS suite would notice. The only check that would is the parity harness, which
+lives in the Python suite — so anyone running `npm test` alone would see a passing, more
+accurate, wrong implementation.
+
+Wrong rather than merely different: float32 semantics are simulable only because each
+`+ − × ÷` rounds separately (§5.1), so a contracted multiply-add breaks the exactness argument
+the whole transform rests on.
+
+Enforced with the real TypeScript AST via the compiler API — `typescript` is already a dev
+dependency for `tsc`, so no dependency was added, and a `*` inside a comment or a string can
+neither trip it nor hide from it. Three companion assertions keep it honest: the file must parse,
+at least 20 arithmetic statements must be found (or the scan is passing vacuously — the same
+failure mode the Python scan guards), and the scan must catch a fused multiply-add injected into
+a copy of the source. That last one is the verify-by-reverting step, inline.
+
+The first version of the scan reported `expF32` as a single 25-operator statement, because a
+function *declaration* is itself a statement and the walk descended into its body. Corrected to
+stop at nested blocks.
+
+### `dist/index.cjs` is executed by the suite
+
+It ships, the export map routes `require()` to it, and no test had ever run it — every other test
+imports the ESM build. Not hypothetical: the audit had already found a real CJS defect, an export
+map whose `require` condition pointed at a `types` entry that did not resolve, and it was found
+by hand.
+
+`tools/clean_install_js.sh` does predict through this entry point and runs in CI, so the path was
+covered — from *outside* the repository, against an installed tarball. That is the right place
+for a packaging check and the wrong place for the only execution of a shipped build output.
+
+Five assertions: identical named exports to the ESM build, bit-identical margins and outputs
+across all corpus rows, bit-exactness against XGBoost's recorded ground truth (not merely
+agreement with the sibling build — two builds of one mistake agree perfectly), identical refusal
+codes on three cases the readers were recently changed to refuse, and no `require` or `import` of
+its own, since zero runtime dependencies has to hold for the file `require()` actually loads.
+
+### The export self-check's coverage is asserted rather than argued
+
+`_leaf_reaching_rows` justified its own sufficiency: a node whose feature-interval is empty "is
+reachable in the graph but reachable by **no input at all**, so no row can exist for it and no
+change to it can alter any prediction."
+
+False for `NaN`, which routes by `default_left` and ignores thresholds entirely. A 7-node tree
+where leaf 6's finite box is `col0 >= 20 ∧ col0 < 10` — empty — is reached by `[nan, 5.0]`: the
+box tracking drops it, `_representative_row` returns `None`, the row is skipped **silently**, and
+corrupting leaf 6's value leaves every self-check margin identical. The mandatory self-check of
+§8.3 would pass over a wrong leaf.
+
+`_assert_sample_reaches_every_live_leaf` now walks the sample and requires every live leaf to be
+reached, naming the misses per tree. Confirmed to fire on exactly that constructed case, and to
+be quiet on every fixture — the search of 162 fitted models that found 0 live nodes with an empty
+box is what makes it safe to enforce rather than merely diagnostic.
+
+**Ordering matters and I got it wrong first.** Asserting coverage inside `_self_check_rows`, before
+the margin comparison, inverted the two checks: corrupted thresholds can make a leaf's box empty,
+so the coverage complaint fired on an artifact whose actual defect was a wrong number, replacing
+`MarginMismatchError` with the weaker finding. Coverage is a statement about the sufficiency of a
+check that **passed**, so it runs after it.
+
+### npm publishes via Trusted Publishing, with no token
+
+`NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}` is gone. No npm credential exists in this repository,
+which makes the npm side symmetric with PyPI's — that side never had one. `id-token: write` on the
+publish job is now the whole of the credential.
+
+npm Trusted Publishing requires npm ≥ 11.5.1 and Node 20 bundles 10.8.2, so the CLI is upgraded
+in place rather than by moving to a newer Node: the build happened in `verify` under Node 20, and
+this job only uploads a tarball it already holds. Upgrading a build toolchain to change a publish
+mechanism would be the wrong trade.
+
+`--tag rc` and `publishConfig.tag` both stay. The flag is what npm 10.8.2 needed and the manifest
+field is what makes the behaviour independent of remembering the flag.
+
+### Left open deliberately
+
+`PAIRED_TRANSFORM`'s ordinary prototype, and the fixture generators' self-checks not running in
+CI. Both judged not worth acting on now: the first is unexploitable because `objective` is
+allow-list-checked before that table is consulted, and the second is a coverage gap in a
+regeneration path whose output is already verified byte-identical.
+
+Suites: Python 1056 → 1058, Node 148 → 157.

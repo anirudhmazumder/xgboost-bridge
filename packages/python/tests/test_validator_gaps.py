@@ -274,3 +274,69 @@ def test_the_readme_names_attributes_that_actually_exist() -> None:
             assert hasattr(instances[cls], attribute), (
                 f"{cls.__name__} has no attribute {attribute}, but the README says it does"
             )
+
+
+# ---------------------------------------------------------------------------
+# The export self-check's coverage is asserted, not argued (D060)
+# ---------------------------------------------------------------------------
+
+
+def test_the_self_check_refuses_a_sample_that_misses_a_live_leaf() -> None:
+    """The case the sufficiency argument said could not exist.
+
+    `_leaf_reaching_rows` justified itself by reasoning that a node whose
+    feature-interval is empty "is reachable in the graph but reachable by no input
+    at all, so no row can exist for it". That is false for `NaN`, which routes by
+    `default_left` and ignores thresholds entirely.
+
+    Leaf 6 below has the finite box `col0 >= 20 and col0 < 10` — empty — and is
+    reached by `[nan, 5.0]`. The box tracking drops it, `_representative_row`
+    returns `None`, the row is skipped silently, and corrupting leaf 6's value
+    leaves every self-check margin identical. The mandatory self-check of
+    FORMAT.md §8.3 would pass over a wrong leaf value.
+    """
+    from xgboost_bridge import export
+
+    tree = {
+        "left_children": [1, -1, 3, 5, -1, -1, -1],
+        "right_children": [2, -1, 4, 6, -1, -1, -1],
+        "split_indices": [1, 0, 0, 0, 0, 0, 0],
+        "node_values": [5.0, 0.5, 10.0, 20.0, 1.5, 2.5, 3.5],
+        "default_left": [1, 0, 1, 0, 0, 0, 0],
+    }
+    rows = export._self_check_rows([tree], 2)
+
+    # The premise: the sample really does miss leaf 6, and a NaN row reaches it.
+    with pytest.raises(errors.MalformedTreeError) as caught:
+        export._assert_sample_reaches_every_live_leaf([tree], rows)
+    assert "6" in str(caught.value)
+
+    reaching = np.array([[np.nan, 5.0]], dtype=np.float64)
+    export._assert_sample_reaches_every_live_leaf(
+        [tree], np.vstack([rows, reaching])
+    )
+
+
+def test_the_coverage_assertion_passes_on_every_real_fixture() -> None:
+    """The other direction, and the reason this is safe to enforce.
+
+    A search of 162 fitted models found 0 live nodes with an empty box, so this
+    has never fired on a real model. If it ever does, the fix is to extend the
+    sample, not to weaken the check — so it must be quiet on everything the
+    exporter actually produces.
+    """
+    import pathlib
+
+    from xgboost_bridge import export
+
+    corpus = pathlib.Path(__file__).resolve().parents[3] / "fixtures" / "corpus"
+    checked = 0
+    for path in sorted(corpus.glob("*.json")) + sorted((corpus / "adversarial").glob("*.json")):
+        artifact = json.loads(path.read_text())["artifact"]
+        trees_ = artifact["trees"]
+        if not trees_:
+            continue
+        rows = export._self_check_rows(trees_, len(artifact["feature_names"]))
+        export._assert_sample_reaches_every_live_leaf(trees_, rows)
+        checked += 1
+    assert checked >= 15, f"only {checked} fixtures had trees to check"
