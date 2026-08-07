@@ -1062,6 +1062,44 @@ implementations, and its silence is not evidence of equivalence.**
 Only two platforms are measured. A third may agree with neither, and the design is
 indifferent to that by construction — which is the point of observing rather than deriving.
 
+### A tolerance appears in this entry, and it is not drift
+
+A future reader will find the phrase "within 1 ULP" below and should not read it as a
+loosened gate. Two different things are being measured, and only one of them protects the
+artifact:
+
+| | before | after |
+|---|---|---|
+| **The artifact's intercept**, which every prediction depends on | derived, then required bit-equal to the engine — *before* emission | taken from the engine, and required bit-equal to the engine's `predict` on leaf-reaching rows *after* emission |
+| **`derive_intercept`**, a reference function that determines no shipped number | required bit-equal to the engine | required within 1 ULP of the engine |
+
+The gate that protects the artifact was made **stronger**, in two ways: it now validates the
+value after emission and serialization rather than before, and its oracle covers the trees and
+the accumulation as well as the intercept. A single-bit intercept error fails it, pinned in
+both directions.
+
+The tolerance sits on `derive_intercept`, and the reason it must is not convenience: that
+function is **provably unable to be exact on both platforms**, because the thing it targets —
+XGBoost's `logf` — gives two different answers on the two platforms measured, and neither is
+the correctly-rounded one. Requiring bit-equality there does not buy strictness; it buys a
+suite that can only pass on whichever machine the constants were recorded on, which is the
+defect this entry exists to fix. The bound is 1 ULP rather than a percentage precisely so it
+stays a tripwire: a wrong space, a missing clamp, or an unsnapped `base_score` moves the
+result by far more than one float32 step and still fails.
+
+Two further re-pinnings in the same spirit, neither of them a relaxation of what is caught:
+the Cox NaN test now asserts quiet-NaN-and-refused instead of a **sign bit that IEEE-754
+leaves unspecified** for `log` of a negative, and it additionally asserts the refusal, which
+it did not before. The snapping test moved from `0.7`, where the claim was a 1-ULP
+coincidence, to values where the routes separate by 10, 110 and 116804 ULP, and it now
+asserts its own discriminating power so it cannot silently stop testing anything.
+
+The general rule this yields: **when a check compares our value against an upstream value
+that is itself not reproducible, exactness is not available and pretending otherwise pins the
+platform rather than the behaviour.** Move the exact requirement onto something that *is*
+reproducible — here, the engine's own output on the machine doing the export — and bound the
+non-reproducible comparison explicitly.
+
 ### Test consequences
 
 All 18 first-run Linux failures were this defect in three shapes, and each was re-pinned to

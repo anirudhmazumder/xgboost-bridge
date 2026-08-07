@@ -83,6 +83,19 @@ jobs:
       - name: Cross-language parity, both measurement points
         run: uv run python parity/run_parity.py
 
+      # The 299-row corpus is small enough that a defect reachable only from a
+      # specific feature value could sit inside it: measured, reverting the
+      # sample-side float32 cast in the JavaScript walk produces ONE corpus
+      # mismatch and 1279 of 20000 here. This runs the same comparator over
+      # ~100,000 generated rows, most of which land exactly on a real threshold
+      # or on a float64 value that narrows onto one.
+      #
+      # It also self-checks: a one-ULP injection at each measurement point must
+      # produce exactly one mismatch, because "0 over 100,000 rows" is also what
+      # a silently broken comparison reports.
+      - name: Cross-language parity at scale (~100,000 adversarial rows)
+        run: uv run python parity/run_parity_scale.py
+
   javascript:
     name: JavaScript suite
     runs-on: ubuntu-latest

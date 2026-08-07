@@ -234,9 +234,64 @@ there is no code-level refusal here, only an absence of evidence).
 
 ## Upstream hazards this library documents rather than papers over
 
-Two behaviors originate in XGBoost itself, not in this library, and are
+Three behaviors originate in XGBoost itself, not in this library, and are
 recorded here because a caller comparing this library's output against
 XGBoost's needs to know about them.
+
+**XGBoost's own intercept is not reproducible across platforms, for
+`binary:logistic` and `survival:cox`.** This is the one most likely to reach
+you, because it does not require doing anything unusual — only running on a
+different machine than the one that exported the artifact.
+
+XGBoost computes the margin-space intercept from `base_score` using the
+platform's `logf`. IEEE-754 requires correct rounding only for
+`+ − × ÷ √` and fused multiply-add; `logf` is not covered, and no two
+`libm` implementations agree. Measured on 58 inputs selected because they
+discriminate the candidate implementations, **XGBoost's own intercept
+differs between darwin/arm64 (Apple `libm`) and linux/x86_64 (glibc 2.39)
+on 29 of them** — always by exactly 1 ULP, in both directions, from the
+same model file, the same `base_score`, and the same XGBoost 3.3.0. Full
+measurement, including the first pass of the investigation that reached the
+opposite conclusion from a sample that could not distinguish the
+candidates, is in [`probes/platform_log.md`](probes/platform_log.md).
+
+The consequence for XGBoost, stated plainly: **XGBoost's own margins for
+these two objectives are not bit-reproducible across these two platforms.**
+That is not something this library can fix, and it is not a defect in this
+library.
+
+What it means for you:
+
+- **Export is bit-exact against whichever XGBoost you ran it with**, on any
+  platform. This library reads the intercept out of the engine rather than
+  recomputing it, precisely so that holds everywhere. (D053, FORMAT.md §6.1)
+- **The same model exported on macOS and on Linux can produce artifacts
+  differing by one float32 step in the `intercept` field.** Both are correct
+  — each records what its own engine said. If you need artifacts to be
+  byte-identical, export them on one platform; determinism *within* a
+  platform is byte-identical and tested.
+- **Inference is unaffected and identical everywhere.** The intercept is a
+  stored number, and neither shipped predictor computes a logarithm, so
+  cross-language agreement is exactly `0.0` regardless of which platform
+  produced the artifact.
+- **If you compare this library against your own XGBoost on a different
+  machine than the one that exported the artifact, expect a last-bit
+  margin difference** — and the difference is upstream's, not this
+  library's. Comparing on the *same* machine that exported is bit-exact.
+- `reg:squarederror` takes the identity link, computes no logarithm, and is
+  unaffected.
+
+A smaller companion: for `survival:cox` at a negative `base_score`, XGBoost
+returns a NaN whose **sign bit differs by platform** (`0x7FC00000` versus
+`0xFFC00000`). Both are quiet NaNs, IEEE-754 does not specify the sign for
+`log` of a negative, and such a model is refused by this library either way.
+
+This is the same root cause as [the bundled output
+transform](#the-output-transform-is-bundled-not-the-platforms) below — a
+platform `libm` function that is not required to be correctly rounded. The
+transform is bundled to avoid it; the intercept cannot be, because the value
+must match the engine that produced the model, so it is read from the engine
+instead.
 
 **`±inf` at predict time behaves differently depending on how XGBoost is
 called.** A non-finite feature value **raises** when passed through
