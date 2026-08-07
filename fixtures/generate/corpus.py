@@ -206,11 +206,38 @@ def _write_fixture(
 ) -> dict[str, Any]:
     """Assemble one fixture, self-check it, and write it to `CORPUS_DIR`.
 
-    The self-check re-walks every row with this repository's own
-    `walk_margin` and requires a bit-exact match against XGBoost's observed
-    margin *before* anything is written. Per CLAUDE.md, a disagreement here
-    is never resolved by adjusting the expected value -- it is a defect to
-    report, and this function raises rather than papering over one.
+    ================================================================
+    REGENERATING A FIXTURE IS NOT A WAY TO MAKE A TEST PASS.
+    ================================================================
+
+    If you are here because a fixture assertion went red, stop. **That failure is
+    a finding about the change you just made**, and running this module will
+    overwrite the evidence for it with a record that agrees with your defect. It
+    is the one action in this repository that can make the entire suite --
+    1076 Python tests, 174 JavaScript tests, both parity harnesses at exactly
+    `0.0` -- confirm a wrong number. Nothing else here has that reach.
+
+    The correct next step is to diff the regenerated corpus and prove that **only**
+    `provenance.exporter_version` moved (`RELEASING.md` section 3). If anything
+    numerical moved, that is the finding: read `docs/DECISION_INDEX.md` for what
+    governs the code you touched, and report it.
+
+    Two things make this genuinely safe, and a third that does not:
+
+    * ground truth is XGBoost's. `_ground_truth` calls `booster.predict()`. Nothing
+      in this file derives an expected value from `walk_margin`.
+    * before writing, every row is re-walked with this repository's own
+      `walk_margin` and must match XGBoost **bit for bit**.
+    * and neither of those is sufficient, which is the part worth knowing. Both
+      held while the sample-side `np.float32` cast was reverted and this module
+      regenerated the whole corpus **successfully**: every corpus value is already
+      exact in float32, so narrowing it is a no-op and a broken implementation
+      routes all of them correctly. An independent oracle asked a question that
+      cannot discriminate proves nothing. See `_assert_probe_rows_agree_with_xgboost`,
+      which now asks about rows that *can*, and D064.
+
+    A disagreement is never resolved by adjusting the expected value. This function
+    raises rather than papering over one.
     """
     artifact = export_model(booster)
     margin_bits, output_bits, margin_decimal, output_decimal = _ground_truth(

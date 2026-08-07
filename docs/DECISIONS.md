@@ -2184,6 +2184,15 @@ names that possibility explicitly and tells the reader to rule it out first.
 
 ### Also
 
-`CONTRIBUTING.md` states the fixture rule in the strongest terms available, and the
-README now says CI runs on `workflow_dispatch` — a newcomer who pushes and sees
-nothing would otherwise reasonably conclude CI is broken.
+The fixture rule's strongest statement lives in `fixtures/generate/corpus.py`, in the
+docstring of the function that writes a fixture. That placement is deliberate and was
+a correction: it first went into `CONTRIBUTING.md`, where it was both misfiled — a
+prohibition aimed at contributors, who are not the ones regenerating a corpus — and
+too far from the moment it matters. Someone about to launder a defect is reading the
+generator, not the contributing guide. `docs/MAINTAINING.md` carries the account of
+*why* it is worded that way and points at the code; `CONTRIBUTING.md` is now four
+lines about opening a PR.
+
+The README says CI runs on `workflow_dispatch`, and `VERIFICATION.md` records it as a
+measurement caveat — a newcomer who pushes and sees nothing would otherwise
+reasonably conclude CI is broken.

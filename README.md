@@ -189,28 +189,22 @@ refusals, that is this library working as intended.
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — durable engineering decisions, the
   evidence behind each one, and which superseded which.
 - [`docs/DECISION_INDEX.md`](docs/DECISION_INDEX.md) — the same decisions keyed by
-  **file and function**, so you can look up what governs the code you are about to
-  edit. Generated, and pinned by a test.
+  **file and function**, so you can look up what governs a given piece of code.
+  Generated, and pinned by a test.
+- [`docs/MAINTAINING.md`](docs/MAINTAINING.md) — maintainer notes: the tooling, the
+  gate, and the failure modes that took measurement to find.
 
 Every decision that asserts runtime behaviour is mapped to a test that fails when the behaviour is reverted; the map is [`docs/DECISION_COVERAGE.md`](docs/DECISION_COVERAGE.md).
 
 ## Contributing
 
-[`CONTRIBUTING.md`](CONTRIBUTING.md) — read it before changing anything numerical.
-Two things from it are worth stating here:
+Contributions are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md). For anything
+touching the numerical core, [`docs/MAINTAINING.md`](docs/MAINTAINING.md) is the
+useful background.
 
-**Regenerating a fixture is not a way to make a test pass.** Every guard in this
-repository treats a fixture's recorded margin as ground truth. It genuinely is
-ground truth — the generator takes it from `booster.predict()`, never from this
-library's own walk, and refuses to write a fixture it cannot reproduce bit-exactly.
-But if you change a comparison and regenerate, you are asking a much weaker
-question than you think, and the generator will tell you so: *"this is a defect to
-report, not to fix by adjusting the expected value."* If a fixture assertion goes
-red, that is a finding about your change.
-
-**CI runs on `workflow_dispatch`.** A push will usually produce no run at all. That
-is not CI being broken — every green result recorded here came from an explicit
-dispatch:
+One thing worth knowing before you look at the Actions tab: **CI runs on
+`workflow_dispatch`.** A push will usually produce no run at all. That is not CI
+being broken — every green result recorded here came from an explicit dispatch:
 
 ```bash
 gh workflow run ci.yml --ref main
