@@ -43,7 +43,7 @@ export = ["xgboost==3.3.0"]
 # specifier means the artifact for a given tag depends on whichever hatchling the
 # index serves that day. Everything else on the publish path is version-pinned
 # and hash-locked; this was the one link that was not.
-requires = ["hatchling==1.28.0"]
+requires = ["hatchling==1.31.0"]
 build-backend = "hatchling.build"
 
 # One version literal for the whole Python package, read from the module that
